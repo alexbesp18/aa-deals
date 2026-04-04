@@ -247,21 +247,46 @@ def upsert_batch(sb, deals: list[dict[str, Any]]) -> int:
     return stored
 
 
+def get_completed_cities(sb, today_str: str) -> set[tuple[str, str]]:
+    """Get cities already scraped today from progress table."""
+    result = sb.table("scrape_progress").select("city,state").eq("scraped_date", today_str).execute()
+    return {(r["city"], r["state"]) for r in (result.data or [])}
+
+
+def mark_city_done(sb, city: str, state: str, today_str: str, deals_found: int):
+    """Mark a city as scraped today."""
+    sb.table("scrape_progress").upsert(
+        {"city": city, "state": state, "scraped_date": today_str, "deals_found": deals_found},
+        on_conflict="city,state,scraped_date",
+    ).execute()
+
+
 async def scrape_all() -> int:
-    """Scrape all cities, upsert per-city. Returns total deals stored."""
+    """Scrape all cities, resuming from where last run stopped. Returns total deals stored."""
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_str = today.strftime("%Y-%m-%d")
     dates = [(today + timedelta(days=d), today + timedelta(days=d + 1)) for d in range(1, DAYS_AHEAD + 1)]
 
     sb = get_supabase()
 
-    # Clean past deals
-    sb.table("deals").delete().lt("check_in", today.strftime("%Y-%m-%d")).execute()
-    log.info("Cleaned up past deals")
+    # Clean past deals + old progress
+    sb.table("deals").delete().lt("check_in", today_str).execute()
+    sb.table("scrape_progress").delete().lt("scraped_date", today_str).execute()
+
+    # Check which cities are already done today
+    done = get_completed_cities(sb, today_str)
+    remaining = [(c, s, a) for c, s, a in CITIES if (c, s) not in done]
+
+    if not remaining:
+        log.info(f"All {len(CITIES)} cities already scraped today — nothing to do")
+        return 0
+
+    log.info(f"{len(done)} cities already done today, {len(remaining)} remaining")
 
     sem = asyncio.Semaphore(MAX_CONCURRENT)
     total_stored = 0
 
-    # Webshare rotating residential proxy — each request gets a fresh IP
+    # Webshare rotating residential proxy
     proxy_user = os.environ.get("PROXY_USERNAME", "")
     proxy_pass = os.environ.get("PROXY_PASSWORD", "")
     proxy_url = f"http://{proxy_user}-rotate:{proxy_pass}@p.webshare.io:80" if proxy_user else None
@@ -272,10 +297,9 @@ async def scrape_all() -> int:
 
     async with httpx.AsyncClient(timeout=30.0, headers=HEADERS, follow_redirects=True, proxy=proxy_url) as client:
 
-        for idx, (city, state, aid) in enumerate(CITIES):
-            # Pause between cities to avoid Cloudflare rate limiting
+        for idx, (city, state, aid) in enumerate(remaining):
             if idx > 0:
-                await asyncio.sleep(CITY_DELAY + random.uniform(0, 2))
+                await asyncio.sleep(CITY_DELAY + random.uniform(0, 1))
 
             async def search_date(ci: datetime, co: datetime):
                 async with sem:
@@ -285,7 +309,6 @@ async def scrape_all() -> int:
             tasks = [search_date(ci, co) for ci, co in dates]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Collect deals for this city
             city_deals: list[dict[str, Any]] = []
             for r in results:
                 if isinstance(r, list):
@@ -299,23 +322,26 @@ async def scrape_all() -> int:
                     best[key] = d
             unique = list(best.values())
 
-            # Upsert immediately
-            if unique:
-                stored = upsert_batch(sb, unique)
-                total_stored += stored
-                top = max(d["yield_ratio"] for d in unique)
-                log.info(f"[{idx+1}/{len(CITIES)}] {city}, {state}: {stored} deals (top {top:.1f}x)")
-            else:
-                log.info(f"[{idx+1}/{len(CITIES)}] {city}, {state}: 0 deals")
+            # Upsert deals + mark city as done
+            stored = upsert_batch(sb, unique) if unique else 0
+            total_stored += stored
+            mark_city_done(sb, city, state, today_str, stored)
 
-    log.info(f"Scrape complete: {total_stored} total deals stored across {len(CITIES)} cities")
+            if stored:
+                top = max(d["yield_ratio"] for d in unique)
+                log.info(f"[{idx+1}/{len(remaining)}] {city}, {state}: {stored} deals (top {top:.1f}x)")
+            else:
+                log.info(f"[{idx+1}/{len(remaining)}] {city}, {state}: 0 deals")
+
+    total_done = len(done) + len(remaining)
+    log.info(f"Run complete: {total_stored} deals stored this run, {total_done}/{len(CITIES)} cities done today")
     return total_stored
 
 
 async def main():
-    log.info(f"Starting AA Hotels scraper — {len(CITIES)} cities, {DAYS_AHEAD} days ahead, {MIN_YIELD}x+ threshold")
+    log.info(f"AA Hotels scraper — {len(CITIES)} cities, {DAYS_AHEAD} days, {MIN_YIELD}x+ threshold")
     total = await scrape_all()
-    log.info(f"Done — {total} deals in database")
+    log.info(f"Done — {total} deals added this run")
 
 
 if __name__ == "__main__":
