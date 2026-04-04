@@ -217,87 +217,24 @@ async def search_city(
             "scraped_at": datetime.now(UTC).isoformat(),
         })
 
-    # Log first-city diagnostic once
-    if raw_yields and city == "New York":
-        raw_yields_sorted = sorted(raw_yields, reverse=True)
-        log.info(f"[DIAG] {city} {check_in.date()}: {len(results_list)} hotels, yields: max={raw_yields_sorted[0]:.1f}x, top5={[f'{y:.1f}' for y in raw_yields_sorted[:5]]}")
-
     return deals
 
 
 # ── Main scraper ─────────────────────────────────────────────────────────────
 
-async def scrape_all() -> list[dict[str, Any]]:
-    """Scrape all cities across date range, return high-yield deals."""
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    # 1-night stays for every day in range
-    dates: list[tuple[datetime, datetime]] = []
-    for offset in range(1, DAYS_AHEAD + 1):
-        ci = today + timedelta(days=offset)
-        dates.append((ci, ci + timedelta(days=1)))
-
-    sem = asyncio.Semaphore(MAX_CONCURRENT)
-    all_deals: list[dict[str, Any]] = []
-    yield_samples: list[float] = []  # Track all yields for debugging
-    total_searches = len(CITIES) * len(dates)
-    completed = 0
-
-    async with httpx.AsyncClient(timeout=30.0, headers=HEADERS, follow_redirects=True) as client:
-
-        async def search_one(city: str, state: str, aid: str, ci: datetime, co: datetime):
-            nonlocal completed
-            async with sem:
-                await asyncio.sleep(random.uniform(0.05, 0.2))
-                result = await search_city(client, city, state, aid, ci, co)
-                completed += 1
-                if completed % 500 == 0:
-                    log.info(f"Progress: {completed}/{total_searches} searches, {len(all_deals)} deals ({MIN_YIELD}x+)")
-                return result
-
-        tasks = [
-            search_one(city, state, aid, ci, co)
-            for city, state, aid in CITIES
-            for ci, co in dates
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    for r in results:
-        if isinstance(r, list):
-            all_deals.extend(r)
-
-    # Deduplicate: keep best yield per (hotel_name, check_in, check_out)
-    best: dict[str, dict] = {}
-    for d in all_deals:
-        key = f"{d['hotel_name']}|{d['check_in']}|{d['check_out']}"
-        if key not in best or d["yield_ratio"] > best[key]["yield_ratio"]:
-            best[key] = d
-
-    unique = list(best.values())
-
-    # Yield distribution for debugging
-    if unique:
-        yields = sorted([d["yield_ratio"] for d in unique], reverse=True)
-        log.info(f"Scrape complete: {len(unique)} unique {MIN_YIELD}x+ deals from {completed} searches")
-        log.info(f"Yield distribution: max={yields[0]:.1f}x, p10={yields[len(yields)//10]:.1f}x, median={yields[len(yields)//2]:.1f}x, min={yields[-1]:.1f}x")
-        log.info(f"  30x+: {sum(1 for y in yields if y >= 30)}, 20x+: {sum(1 for y in yields if y >= 20)}, 15x+: {len(yields)}")
-    else:
-        log.warning(f"Scrape complete: 0 deals from {completed} searches — API may be blocking or yields are below {MIN_YIELD}x")
-
-    return unique
+def get_supabase():
+    """Get Supabase client."""
+    return create_client(
+        os.environ["SUPABASE_URL"],
+        os.environ["SUPABASE_SERVICE_ROLE_KEY"],
+        options=ClientOptions(schema="aa_hotels"),
+    )
 
 
-def upsert_deals(deals: list[dict[str, Any]]) -> int:
-    """Upsert deals to Supabase, preserving is_booked. Returns count stored."""
-    url = os.environ["SUPABASE_URL"]
-    key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-    sb = create_client(url, key, options=ClientOptions(schema="aa_hotels"))
-
-    # Delete past deals
-    today = datetime.now().strftime("%Y-%m-%d")
-    sb.table("deals").delete().lt("check_in", today).execute()
-    log.info("Cleaned up past deals")
-
-    # Upsert in batches of 100 (no is_booked field → preserved on conflict)
+def upsert_batch(sb, deals: list[dict[str, Any]]) -> int:
+    """Upsert a batch of deals, preserving is_booked."""
+    if not deals:
+        return 0
     stored = 0
     for i in range(0, len(deals), 100):
         batch = deals[i : i + 100]
@@ -306,19 +243,66 @@ def upsert_deals(deals: list[dict[str, Any]]) -> int:
             on_conflict="hotel_name,check_in,check_out",
         ).execute()
         stored += len(result.data) if result.data else 0
-
-    log.info(f"Upserted {stored} deals to Supabase")
     return stored
 
 
+async def scrape_all() -> int:
+    """Scrape all cities, upsert per-city. Returns total deals stored."""
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    dates = [(today + timedelta(days=d), today + timedelta(days=d + 1)) for d in range(1, DAYS_AHEAD + 1)]
+
+    sb = get_supabase()
+
+    # Clean past deals
+    sb.table("deals").delete().lt("check_in", today.strftime("%Y-%m-%d")).execute()
+    log.info("Cleaned up past deals")
+
+    sem = asyncio.Semaphore(MAX_CONCURRENT)
+    total_stored = 0
+
+    async with httpx.AsyncClient(timeout=30.0, headers=HEADERS, follow_redirects=True) as client:
+
+        for idx, (city, state, aid) in enumerate(CITIES):
+
+            async def search_date(ci: datetime, co: datetime):
+                async with sem:
+                    await asyncio.sleep(random.uniform(0.05, 0.15))
+                    return await search_city(client, city, state, aid, ci, co)
+
+            tasks = [search_date(ci, co) for ci, co in dates]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Collect deals for this city
+            city_deals: list[dict[str, Any]] = []
+            for r in results:
+                if isinstance(r, list):
+                    city_deals.extend(r)
+
+            # Deduplicate per city: best yield per (hotel_name, check_in)
+            best: dict[str, dict] = {}
+            for d in city_deals:
+                key = f"{d['hotel_name']}|{d['check_in']}"
+                if key not in best or d["yield_ratio"] > best[key]["yield_ratio"]:
+                    best[key] = d
+            unique = list(best.values())
+
+            # Upsert immediately
+            if unique:
+                stored = upsert_batch(sb, unique)
+                total_stored += stored
+                top = max(d["yield_ratio"] for d in unique)
+                log.info(f"[{idx+1}/{len(CITIES)}] {city}, {state}: {stored} deals (top {top:.1f}x)")
+            else:
+                log.info(f"[{idx+1}/{len(CITIES)}] {city}, {state}: 0 deals")
+
+    log.info(f"Scrape complete: {total_stored} total deals stored across {len(CITIES)} cities")
+    return total_stored
+
+
 async def main():
-    log.info(f"Starting AA Hotels scraper — {len(CITIES)} cities, {DAYS_AHEAD} days ahead")
-    deals = await scrape_all()
-    if deals:
-        upsert_deals(deals)
-    else:
-        log.warning("No deals found!")
-    log.info("Done")
+    log.info(f"Starting AA Hotels scraper — {len(CITIES)} cities, {DAYS_AHEAD} days ahead, {MIN_YIELD}x+ threshold")
+    total = await scrape_all()
+    log.info(f"Done — {total} deals in database")
 
 
 if __name__ == "__main__":
