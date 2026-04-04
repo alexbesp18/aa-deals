@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-AA Hotels scraper — finds 30x+ miles/dollar deals across US cities.
+AA Hotels scraper — finds high-yield miles/dollar deals across US cities.
 Writes to Supabase aa_hotels.deals. Designed for GitHub Actions daily cron.
+Stores 15x+ deals; dashboard filters to 30x+ for display.
 """
 
 import asyncio
 import logging
 import os
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Any
 from urllib.parse import quote
 
@@ -19,9 +20,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 BASE = "https://www.aadvantagehotels.com"
-MIN_YIELD = 30.0
-MAX_CONCURRENT = 20
-DAYS_AHEAD = 45
+MIN_YIELD = 15.0  # Store 15x+, dashboard filters to 30x+
+MAX_CONCURRENT = 15  # Slightly lower to avoid Cloudflare triggers
+DAYS_AHEAD = 90
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
     "Accept": "application/json",
@@ -163,9 +164,15 @@ async def search_city(
         return []
 
     # Step 3: parse results
+    results_list = data.get("results", [])
+    if not results_list:
+        log.debug(f"No results for {city}, {state} on {check_in.date()}")
+        return []
+
     nights = (check_out - check_in).days
     deals = []
-    for h in data.get("results", []):
+    raw_yields = []
+    for h in results_list:
         hotel = h.get("hotel", {})
         name = hotel.get("name", "")
         if not name:
@@ -183,6 +190,7 @@ async def search_city(
             continue
 
         yield_ratio = total_miles / total_cost
+        raw_yields.append(yield_ratio)
         if yield_ratio < MIN_YIELD:
             continue
 
@@ -206,8 +214,13 @@ async def search_city(
             "yield_ratio": round(yield_ratio, 2),
             "url": booking_url,
             "agoda_hotel_id": hotel_id,
-            "scraped_at": datetime.utcnow().isoformat(),
+            "scraped_at": datetime.now(UTC).isoformat(),
         })
+
+    # Log first-city diagnostic once
+    if raw_yields and city == "New York":
+        raw_yields_sorted = sorted(raw_yields, reverse=True)
+        log.info(f"[DIAG] {city} {check_in.date()}: {len(results_list)} hotels, yields: max={raw_yields_sorted[0]:.1f}x, top5={[f'{y:.1f}' for y in raw_yields_sorted[:5]]}")
 
     return deals
 
@@ -215,17 +228,17 @@ async def search_city(
 # ── Main scraper ─────────────────────────────────────────────────────────────
 
 async def scrape_all() -> list[dict[str, Any]]:
-    """Scrape all cities across date range, return 30x+ deals."""
+    """Scrape all cities across date range, return high-yield deals."""
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    # 1-night stays for every day in range
     dates: list[tuple[datetime, datetime]] = []
     for offset in range(1, DAYS_AHEAD + 1):
         ci = today + timedelta(days=offset)
-        dates.append((ci, ci + timedelta(days=1)))  # 1-night stays
-        if ci.weekday() in (4, 5):  # Fri/Sat: also check 2-night
-            dates.append((ci, ci + timedelta(days=2)))
+        dates.append((ci, ci + timedelta(days=1)))
 
     sem = asyncio.Semaphore(MAX_CONCURRENT)
     all_deals: list[dict[str, Any]] = []
+    yield_samples: list[float] = []  # Track all yields for debugging
     total_searches = len(CITIES) * len(dates)
     completed = 0
 
@@ -237,8 +250,8 @@ async def scrape_all() -> list[dict[str, Any]]:
                 await asyncio.sleep(random.uniform(0.05, 0.2))
                 result = await search_city(client, city, state, aid, ci, co)
                 completed += 1
-                if completed % 200 == 0:
-                    log.info(f"Progress: {completed}/{total_searches} searches, {len(all_deals)} deals so far")
+                if completed % 500 == 0:
+                    log.info(f"Progress: {completed}/{total_searches} searches, {len(all_deals)} deals ({MIN_YIELD}x+)")
                 return result
 
         tasks = [
@@ -260,7 +273,16 @@ async def scrape_all() -> list[dict[str, Any]]:
             best[key] = d
 
     unique = list(best.values())
-    log.info(f"Scrape complete: {len(unique)} unique 30x+ deals from {completed} searches")
+
+    # Yield distribution for debugging
+    if unique:
+        yields = sorted([d["yield_ratio"] for d in unique], reverse=True)
+        log.info(f"Scrape complete: {len(unique)} unique {MIN_YIELD}x+ deals from {completed} searches")
+        log.info(f"Yield distribution: max={yields[0]:.1f}x, p10={yields[len(yields)//10]:.1f}x, median={yields[len(yields)//2]:.1f}x, min={yields[-1]:.1f}x")
+        log.info(f"  30x+: {sum(1 for y in yields if y >= 30)}, 20x+: {sum(1 for y in yields if y >= 20)}, 15x+: {len(yields)}")
+    else:
+        log.warning(f"Scrape complete: 0 deals from {completed} searches — API may be blocking or yields are below {MIN_YIELD}x")
+
     return unique
 
 

@@ -32,7 +32,7 @@ function bookingUrl(agodaHotelId: string | null, checkIn: string, checkOut: stri
 export const dynamic = "force-dynamic";
 
 export default async function Page(props: {
-  searchParams: Promise<{ brand?: string; state?: string }>;
+  searchParams: Promise<{ brand?: string; state?: string; min_yield?: string }>;
 }) {
   const searchParams = await props.searchParams;
   const brand = searchParams.brand || "hilton";
@@ -43,11 +43,13 @@ export default async function Page(props: {
   const today = new Date();
   const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 
+  const minYield = Number(searchParams.min_yield) || 15;
+
   let query = supabase
     .from("deals")
     .select("*")
     .eq("is_booked", false)
-    .gte("yield_ratio", 30)
+    .gte("yield_ratio", minYield)
     .gte("check_in", todayStr)
     .order("yield_ratio", { ascending: false })
     .limit(200);
@@ -72,6 +74,17 @@ export default async function Page(props: {
       </div>
 
       <form className="flex flex-wrap items-end gap-3 mb-6 bg-white rounded-lg shadow-sm border p-4">
+        <div>
+          <label className="block text-xs font-medium text-gray-500 mb-1">Min Yield</label>
+          <select name="min_yield" defaultValue={String(minYield)} className="border rounded-md px-3 py-2 text-sm bg-white">
+            <option value="15">15x+</option>
+            <option value="20">20x+</option>
+            <option value="25">25x+</option>
+            <option value="30">30x+</option>
+            <option value="40">40x+</option>
+            <option value="50">50x+</option>
+          </select>
+        </div>
         <div>
           <label className="block text-xs font-medium text-gray-500 mb-1">Brand</label>
           <select name="brand" defaultValue={brand} className="border rounded-md px-3 py-2 text-sm bg-white">
