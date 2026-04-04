@@ -21,9 +21,9 @@ log = logging.getLogger(__name__)
 
 BASE = "https://www.aadvantagehotels.com"
 MIN_YIELD = 15.0  # Store 15x+, dashboard filters to 30x+
-MAX_CONCURRENT = 5  # Low concurrency to avoid Cloudflare
+MAX_CONCURRENT = 15  # Higher concurrency OK with proxy
 DAYS_AHEAD = 90
-CITY_DELAY = 5.0  # Seconds between cities to avoid rate limiting
+CITY_DELAY = 1.0  # Minimal delay with rotating proxy
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
     "Accept": "application/json",
@@ -261,7 +261,16 @@ async def scrape_all() -> int:
     sem = asyncio.Semaphore(MAX_CONCURRENT)
     total_stored = 0
 
-    async with httpx.AsyncClient(timeout=30.0, headers=HEADERS, follow_redirects=True) as client:
+    # Webshare rotating residential proxy — each request gets a fresh IP
+    proxy_user = os.environ.get("PROXY_USERNAME", "")
+    proxy_pass = os.environ.get("PROXY_PASSWORD", "")
+    proxy_url = f"http://{proxy_user}-rotate:{proxy_pass}@p.webshare.io:80" if proxy_user else None
+    if proxy_url:
+        log.info("Using Webshare rotating proxy")
+    else:
+        log.warning("No proxy configured — may hit Cloudflare rate limits")
+
+    async with httpx.AsyncClient(timeout=30.0, headers=HEADERS, follow_redirects=True, proxy=proxy_url) as client:
 
         for idx, (city, state, aid) in enumerate(CITIES):
             # Pause between cities to avoid Cloudflare rate limiting
