@@ -205,7 +205,7 @@ async def search_city(
             "brand": detect_brand(name),
             "city_name": city,
             "state": state,
-            "stars": hotel.get("stars", 0),
+            "stars": int(hotel.get("stars", 0)),
             "check_in": check_in.strftime("%Y-%m-%d"),
             "check_out": check_out.strftime("%Y-%m-%d"),
             "nights": nights,
