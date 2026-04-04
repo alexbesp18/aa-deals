@@ -21,8 +21,9 @@ log = logging.getLogger(__name__)
 
 BASE = "https://www.aadvantagehotels.com"
 MIN_YIELD = 15.0  # Store 15x+, dashboard filters to 30x+
-MAX_CONCURRENT = 15  # Slightly lower to avoid Cloudflare triggers
+MAX_CONCURRENT = 5  # Low concurrency to avoid Cloudflare
 DAYS_AHEAD = 90
+CITY_DELAY = 5.0  # Seconds between cities to avoid rate limiting
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
     "Accept": "application/json",
@@ -263,10 +264,13 @@ async def scrape_all() -> int:
     async with httpx.AsyncClient(timeout=30.0, headers=HEADERS, follow_redirects=True) as client:
 
         for idx, (city, state, aid) in enumerate(CITIES):
+            # Pause between cities to avoid Cloudflare rate limiting
+            if idx > 0:
+                await asyncio.sleep(CITY_DELAY + random.uniform(0, 2))
 
             async def search_date(ci: datetime, co: datetime):
                 async with sem:
-                    await asyncio.sleep(random.uniform(0.05, 0.15))
+                    await asyncio.sleep(random.uniform(0.3, 0.8))
                     return await search_city(client, city, state, aid, ci, co)
 
             tasks = [search_date(ci, co) for ci, co in dates]
