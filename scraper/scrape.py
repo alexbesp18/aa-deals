@@ -21,9 +21,9 @@ log = logging.getLogger(__name__)
 
 BASE = "https://www.aadvantagehotels.com"
 MIN_YIELD = 15.0  # Store 15x+, dashboard filters to 30x+
-MAX_CONCURRENT = 15  # Higher concurrency OK with proxy
+MAX_CONCURRENT = 30  # Aggressive — proxy rotates IPs per request
 DAYS_AHEAD = 90
-CITY_DELAY = 1.0  # Minimal delay with rotating proxy
+CITY_DELAY = 0.5  # Minimal — each request is a different IP
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
     "Accept": "application/json",
@@ -279,7 +279,7 @@ async def scrape_all() -> int:
 
             async def search_date(ci: datetime, co: datetime):
                 async with sem:
-                    await asyncio.sleep(random.uniform(0.3, 0.8))
+                    await asyncio.sleep(random.uniform(0.05, 0.15))
                     return await search_city(client, city, state, aid, ci, co)
 
             tasks = [search_date(ci, co) for ci, co in dates]
