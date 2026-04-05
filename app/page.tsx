@@ -19,7 +19,7 @@ const STATES = [
   "VT","VA","WA","WV","WI","WY",
 ];
 
-function fmtDate(iso: string) {
+function formatDate(iso: string) {
   const [y, m, d] = iso.split("-").map(Number);
   const dt = new Date(y!, m! - 1, d!);
   return dt.toLocaleDateString("en-US", { month: "short", day: "numeric" });
@@ -42,7 +42,7 @@ export default async function Page(props: {
 
   let query = supabase
     .from("deals")
-    .select("*")
+    .select("id, hotel_name, city_name, state, yield_ratio, total_cost, total_miles, check_in, url")
     .eq("is_booked", false)
     .gte("yield_ratio", minYield)
     .gte("check_in", todayStr)
@@ -56,15 +56,12 @@ export default async function Page(props: {
     query = query.eq("state", stateFilter);
   }
 
-  const { data: deals, error } = await query;
+  // Parallel queries — no waterfall
+  const [{ data: deals, error }, { data: lastScrape }] = await Promise.all([
+    query,
+    supabase.from("scrape_progress").select("completed_at").order("completed_at", { ascending: false }).limit(1),
+  ]);
   const dealCount = deals?.length ?? 0;
-
-  // Last scraped timestamp
-  const { data: lastScrape } = await supabase
-    .from("scrape_progress")
-    .select("completed_at")
-    .order("completed_at", { ascending: false })
-    .limit(1);
   const lastScraped = lastScrape?.[0]?.completed_at;
 
   return (
@@ -165,7 +162,7 @@ export default async function Page(props: {
                       {Number(deal.total_miles).toLocaleString()}
                     </td>
                     <td className="px-4 py-3 text-gray-600 whitespace-nowrap">
-                      {fmtDate(deal.check_in)}
+                      {formatDate(deal.check_in)}
                     </td>
                     <td className="px-4 py-3 text-center">
                       <div className="flex items-center justify-center gap-2">

@@ -27,6 +27,12 @@ HEADERS = {
     "Accept": "application/json",
     "Accept-Language": "en-US,en;q=0.5",
 }
+US_STATES = {
+    "AL","AK","AZ","AR","CA","CO","CT","DC","DE","FL","GA","HI","ID","IL","IN",
+    "IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH",
+    "NJ","NM","NY","NC","ND","OH","OK","OR","PA","PR","RI","SC","SD","TN","TX",
+    "UT","VT","VA","WA","WV","WI","WY",
+}
 
 # ── Brand detection ──────────────────────────────────────────────────────────
 
@@ -185,11 +191,6 @@ async def search_city_date(
         place_id = f"AGODA_CITY|{agoda_id}"
         ci = f"{check_in.month:02}/{check_in.day:02}/{check_in.year}"
         co = f"{check_out.month:02}/{check_out.day:02}/{check_out.year}"
-        # International cities shouldn't say "United States"
-        US_STATES = {"AL","AK","AZ","AR","CA","CO","CT","DC","DE","FL","GA","HI","ID","IL","IN",
-                     "IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH",
-                     "NJ","NM","NY","NC","ND","OH","OK","OR","PA","PR","RI","SC","SD","TN","TX",
-                     "UT","VT","VA","WA","WV","WI","WY"}
         query_str = f"{city} ({state}), United States" if state in US_STATES else city
 
         try:
@@ -328,7 +329,10 @@ async def scrape_all() -> int:
     sem = asyncio.Semaphore(MAX_CONCURRENT)
     total_stored = 0
 
-    async with httpx.AsyncClient(timeout=30.0, headers=HEADERS, follow_redirects=True, proxy=proxy_url) as client:
+    async with httpx.AsyncClient(
+        timeout=30.0, headers=HEADERS, follow_redirects=True, proxy=proxy_url,
+        limits=httpx.Limits(max_connections=100, max_keepalive_connections=60),
+    ) as client:
 
         # Process city by city so we can mark progress + upsert incrementally
         for idx, (city, state, aid) in enumerate(remaining):
