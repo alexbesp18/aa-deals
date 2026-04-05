@@ -207,7 +207,12 @@ async def search_city_date(
         place_id = f"AGODA_CITY|{agoda_id}"
         ci = f"{check_in.month:02}/{check_in.day:02}/{check_in.year}"
         co = f"{check_out.month:02}/{check_out.day:02}/{check_out.year}"
-        query_str = f"{city} ({state}), United States"
+        # International cities shouldn't say "United States"
+        US_STATES = {"AL","AK","AZ","AR","CA","CO","CT","DC","DE","FL","GA","HI","ID","IL","IN",
+                     "IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH",
+                     "NJ","NM","NY","NC","ND","OH","OK","OR","PA","PR","RI","SC","SD","TN","TX",
+                     "UT","VT","VA","WA","WV","WI","WY"}
+        query_str = f"{city} ({state}), United States" if state in US_STATES else city
 
         try:
             r = await client.get(
@@ -219,22 +224,22 @@ async def search_city_date(
                 f"&rooms=1&source=AGODA"
             )
             if r.status_code != 200:
-                return []
+                return [{"_error": f"search_request_{r.status_code}"}]
             uuid = r.json().get("uuid")
             if not uuid:
-                return []
-        except Exception:
-            return []
+                return [{"_error": "no_uuid"}]
+        except Exception as e:
+            return [{"_error": f"search_request_exc_{type(e).__name__}"}]
 
         await asyncio.sleep(random.uniform(0.05, 0.15))
 
         try:
             r = await client.get(f"{BASE}/rest/aadvantage-hotels/search/{uuid}?pageSize=45&pageNumber=1")
             if r.status_code != 200:
-                return []
+                return [{"_error": f"search_results_{r.status_code}"}]
             results_list = r.json().get("results", [])
-        except Exception:
-            return []
+        except Exception as e:
+            return [{"_error": f"search_results_exc_{type(e).__name__}"}]
 
         if not results_list:
             return []
@@ -325,7 +330,6 @@ async def scrape_all() -> int:
     dates = [(today + timedelta(days=d), today + timedelta(days=d + 1)) for d in range(1, DAYS_AHEAD + 1)]
 
     sb = get_supabase()
-    sb.table("deals").delete().lt("check_in", today_str).execute()
     sb.table("scrape_progress").delete().lt("scraped_date", today_str).execute()
 
     done = get_completed_cities(sb, today_str)
@@ -357,14 +361,18 @@ async def scrape_all() -> int:
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Collect + dedupe (upsert handles conflict but we reduce payload)
+            # Collect + dedupe, track errors
             best: dict[str, dict] = {}
+            errors: dict[str, int] = {}
             for r in results:
                 if isinstance(r, list):
                     for d in r:
-                        key = f"{d['hotel_name']}|{d['check_in']}"
-                        if key not in best or d["yield_ratio"] > best[key]["yield_ratio"]:
-                            best[key] = d
+                        if "_error" in d:
+                            errors[d["_error"]] = errors.get(d["_error"], 0) + 1
+                        elif "hotel_name" in d:
+                            key = f"{d['hotel_name']}|{d['check_in']}"
+                            if key not in best or d["yield_ratio"] > best[key]["yield_ratio"]:
+                                best[key] = d
 
             unique = list(best.values())
             stored = upsert_batch(sb, unique) if unique else 0
@@ -372,9 +380,12 @@ async def scrape_all() -> int:
             mark_city_done(sb, city, state, today_str, stored)
 
             top_str = f" (top {max(d['yield_ratio'] for d in unique):.1f}x)" if unique else ""
-            log.info(f"[{idx+1}/{len(remaining)}] {city}, {state}: {stored} deals{top_str}")
+            err_str = f" ERRORS: {errors}" if errors else ""
+            log.info(f"[{idx+1}/{len(remaining)}] {city}, {state}: {stored} deals{top_str}{err_str}")
 
-    log.info(f"Run complete: {total_stored} deals, {len(done)+len(remaining)}/{len(CITIES)} cities done")
+    # Clean past deals AFTER successful processing (not before — avoids empty DB on crash)
+    deleted = sb.table("deals").delete().lt("check_in", today_str).execute()
+    log.info(f"Run complete: {total_stored} deals, {len(done)+len(remaining)}/{len(CITIES)} cities done, cleaned past deals")
     return total_stored
 
 
