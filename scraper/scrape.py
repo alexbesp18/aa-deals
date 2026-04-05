@@ -77,6 +77,7 @@ def detect_brand(name: str) -> str | None:
 # ── City data (Agoda place IDs) ─────────────────────────────────────────────
 
 CITIES: list[tuple[str, str, str]] = [
+    # ── Major metros (88) ────────────────────────────────────────────────────
     ("New York", "NY", "318"), ("Los Angeles", "CA", "12772"),
     ("Chicago", "IL", "7889"), ("Dallas", "TX", "8683"),
     ("Houston", "TX", "1178"), ("Washington", "DC", "2320"),
@@ -122,6 +123,40 @@ CITIES: list[tuple[str, str, str]] = [
     ("Daytona Beach", "FL", "3965"), ("Melbourne", "FL", "11456"),
     ("Syracuse", "NY", "5831"), ("Maui", "HI", "9296"),
     ("Palm Beach", "FL", "16947"), ("Napa", "CA", "10740"),
+    # ── Additional MSAs from 004 project ─────────────────────────────────────
+    ("Rochester", "NY", "17127"), ("Fresno", "CA", "13602"),
+    ("Worcester", "MA", "19522"), ("Scranton", "PA", "14274"),
+    ("Modesto", "CA", "8418"), ("Augusta", "GA", "17253"),
+    ("Bridgeport", "CT", "22599"), ("Bakersfield", "CA", "14094"),
+    ("New Haven", "CT", "3984"), ("McAllen", "TX", "5397"),
+    ("Oxnard", "CA", "10157"), ("Allentown", "PA", "1868"),
+    ("Stockton", "CA", "13336"), ("Lakeland", "FL", "7485"),
+    ("Springfield", "MA", "570"), ("Winston-Salem", "NC", "19842"),
+    ("Ogden", "UT", "10860"), ("Fort Worth", "TX", "17487"),
+    ("Reno", "NV", "6214"),
+    # ── Resort, tourism & international AA hubs ──────────────────────────────
+    ("Sedona", "AZ", "9768"), ("Park City", "UT", "12399"),
+    ("Anchorage", "AK", "11740"), ("Myrtle Beach", "SC", "9442"),
+    ("Palm Springs", "CA", "1579"), ("Branson", "MO", "11267"),
+    ("Gatlinburg", "TN", "4197"), ("San Juan", "PR", "17823"),
+    ("Cancun", "MX", "5954"), ("Cabo San Lucas", "MX", "9739"),
+    ("Santa Fe", "NM", "9589"), ("Hilton Head Island", "SC", "13747"),
+    ("Destin", "FL", "6882"), ("Asheville", "NC", "7165"),
+    ("Monterey", "CA", "4635"), ("Vail", "CO", "9323"),
+    ("Jackson Hole", "WY", "19516"), ("South Lake Tahoe", "CA", "5283"),
+    ("Pensacola", "FL", "8053"), ("Galveston", "TX", "10196"),
+    ("Wilmington", "NC", "17055"), ("Newport", "RI", "17260"),
+    ("Williamsburg", "VA", "6942"), ("Pigeon Forge", "TN", "10501"),
+    ("Gulf Shores", "AL", "23541"), ("Panama City", "FL", "17589"),
+    ("Corpus Christi", "TX", "7436"), ("Clearwater", "FL", "9974"),
+    ("Naples", "FL", "342"), ("St. Augustine", "FL", "16395"),
+    ("Bend", "OR", "2295"), ("Flagstaff", "AZ", "6958"),
+    ("Moab", "UT", "8145"), ("Traverse City", "MI", "13240"),
+    ("Santa Barbara", "CA", "8292"), ("Miami Beach", "FL", "18720"),
+    ("Nassau", "BS", "10440"), ("Punta Cana", "DO", "3332"),
+    ("Big Island", "HI", "513638"), ("Kauai", "HI", "513641"),
+    ("Aspen", "CO", "6714"), ("Santa Monica", "CA", "227"),
+    ("Beverly Hills", "CA", "2398"),
 ]
 
 
