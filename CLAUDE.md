@@ -81,7 +81,7 @@ scrape_progress (
 
 | Secret | Location | Purpose |
 |--------|----------|---------|
-| `SUPABASE_URL` | Vercel + GH Actions | https://YOUR_PROJECT_REF.supabase.co |
+| `SUPABASE_URL` | Vercel + GH Actions | (see Vercel env vars) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Vercel + GH Actions | Service role (server-only) |
 | `PROXY_USERNAME` | GH Actions | Webshare rotating residential |
 | `PROXY_PASSWORD` | GH Actions | Webshare rotating residential |
