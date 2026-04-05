@@ -157,6 +157,38 @@ CITIES: list[tuple[str, str, str]] = [
     ("Big Island", "HI", "513638"), ("Kauai", "HI", "513641"),
     ("Aspen", "CO", "6714"), ("Santa Monica", "CA", "227"),
     ("Beverly Hills", "CA", "2398"),
+    # ── International 23x+ (verified via API probe) ──────────────────────────
+    # Middle East (43x Riyadh tops Las Vegas)
+    ("Riyadh", "SA", "5349"), ("Bahrain", "BH", "16630"),
+    ("Abu Dhabi", "AE", "10182"), ("Dubai", "AE", "2994"),
+    ("Cairo", "EG", "7923"), ("Doha", "QA", "4472"),
+    ("Muscat", "OM", "6445"), ("Hurghada", "EG", "6700"),
+    ("Sharm El Sheikh", "EG", "15897"),
+    # Latin America
+    ("Bogota", "CO", "4926"), ("Cartagena", "CO", "10838"),
+    ("Medellin", "CO", "10309"), ("Cali", "CO", "15464"),
+    ("Santa Marta", "CO", "7678"), ("Cusco", "PE", "16970"),
+    ("Panama City", "PA", "3356"), ("Buenos Aires", "AR", "9294"),
+    ("Sao Paulo", "BR", "16638"), ("Santiago", "CL", "86197"),
+    ("Montevideo", "UY", "5534"), ("Quito", "EC", "9909"),
+    ("Antigua Guatemala", "GT", "18181"),
+    # Africa
+    ("Zanzibar", "TZ", "9846"), ("Marrakech", "MA", "11825"),
+    ("Fes", "MA", "12050"),
+    # Southeast Asia
+    ("Ho Chi Minh City", "VN", "13170"), ("Hanoi", "VN", "2758"),
+    ("Colombo", "LK", "7835"), ("Cebu", "PH", "4001"),
+    ("Manila", "PH", "1622"), ("Bangkok", "TH", "9395"),
+    ("Bali", "ID", "17193"),
+    # Europe
+    ("Budapest", "HU", "10647"), ("Dubrovnik", "HR", "4839"),
+    ("Santorini", "GR", "4254"), ("Istanbul", "TR", "14932"),
+    ("Lisbon", "PT", "16364"), ("Athens", "GR", "16571"),
+    ("Amalfi", "IT", "9286"),
+    # East Asia
+    ("Osaka", "JP", "9590"), ("Kyoto", "JP", "1784"),
+    ("Hong Kong", "HK", "16808"), ("Singapore", "SG", "4064"),
+    ("Tokyo", "JP", "5085"),
 ]
 
 
