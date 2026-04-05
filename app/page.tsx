@@ -2,11 +2,14 @@ import { getSupabase } from "@/lib/supabase";
 import { markAsBooked } from "./actions";
 
 const BRANDS: Record<string, string> = {
+  all: "All Brands",
   hilton: "Hilton Family",
   marriott: "Marriott Family",
   ihg: "IHG Family",
   hyatt: "Hyatt Family",
-  all: "All Brands",
+  wyndham: "Wyndham Family",
+  bestwestern: "Best Western",
+  choice: "Choice Hotels",
 };
 
 const STATES = [
@@ -16,17 +19,10 @@ const STATES = [
   "VT","VA","WA","WV","WI","WY",
 ];
 
-function starsDisplay(n: number) {
-  return n > 0 ? "\u2605".repeat(n) + "\u2606".repeat(5 - n) : "\u2014";
-}
-
-function bookingUrl(agodaHotelId: string | null, checkIn: string, checkOut: string) {
-  if (!agodaHotelId) return null;
-  const fmtDate = (d: string) => {
-    const [y, m, day] = d.split("-");
-    return `${m}/${day}/${y}`;
-  };
-  return `https://www.aadvantagehotels.com/hotel/${agodaHotelId}?checkIn=${fmtDate(checkIn)}&checkOut=${fmtDate(checkOut)}&rooms=1&adults=2&mode=earn`;
+function fmtDate(iso: string) {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(y!, m! - 1, d!);
+  return dt.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 export const dynamic = "force-dynamic";
@@ -37,13 +33,12 @@ export default async function Page(props: {
   const searchParams = await props.searchParams;
   const brand = searchParams.brand || "hilton";
   const stateFilter = searchParams.state || "all";
+  const minYield = Number(searchParams.min_yield) || 30;
 
   const supabase = getSupabase();
 
   const today = new Date();
   const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-
-  const minYield = Number(searchParams.min_yield) || 15;
 
   let query = supabase
     .from("deals")
@@ -64,12 +59,27 @@ export default async function Page(props: {
   const { data: deals, error } = await query;
   const dealCount = deals?.length ?? 0;
 
+  // Last scraped timestamp
+  const { data: lastScrape } = await supabase
+    .from("scrape_progress")
+    .select("completed_at")
+    .order("completed_at", { ascending: false })
+    .limit(1);
+  const lastScraped = lastScrape?.[0]?.completed_at;
+
   return (
     <main className="max-w-7xl mx-auto px-4 py-6">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold tracking-tight">AA Hotel Deals</h1>
+        <div className="flex items-baseline justify-between">
+          <h1 className="text-2xl font-bold tracking-tight">AA Hotel Deals</h1>
+          {lastScraped && (
+            <span className="text-xs text-gray-400">
+              Last scraped: {new Date(lastScraped).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+            </span>
+          )}
+        </div>
         <p className="text-sm text-gray-500">
-          30x+ miles per dollar redemptions via aadvantagehotels.com
+          Cherry-picked miles/dollar redemptions via aadvantagehotels.com
         </p>
       </div>
 
@@ -82,7 +92,6 @@ export default async function Page(props: {
             <option value="25">25x+</option>
             <option value="30">30x+</option>
             <option value="40">40x+</option>
-            <option value="50">50x+</option>
           </select>
         </div>
         <div>
@@ -119,39 +128,33 @@ export default async function Page(props: {
             <tr className="border-b bg-gray-50 text-left">
               <th className="px-4 py-3 font-medium text-gray-600">Hotel</th>
               <th className="px-4 py-3 font-medium text-gray-600">Location</th>
-              <th className="px-4 py-3 font-medium text-gray-600 text-center">Stars</th>
               <th className="px-4 py-3 font-medium text-gray-600 text-right">Yield</th>
               <th className="px-4 py-3 font-medium text-gray-600 text-right">Cost</th>
               <th className="px-4 py-3 font-medium text-gray-600 text-right">Miles</th>
-              <th className="px-4 py-3 font-medium text-gray-600">Dates</th>
-              <th className="px-4 py-3 font-medium text-gray-600 text-center">Actions</th>
+              <th className="px-4 py-3 font-medium text-gray-600">Date</th>
+              <th className="px-4 py-3 font-medium text-gray-600 text-center w-32">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y">
             {deals && deals.length > 0 ? (
               deals.map((deal) => {
-                const url = deal.url || bookingUrl(deal.agoda_hotel_id, deal.check_in, deal.check_out);
+                const url = deal.url;
                 return (
                   <tr key={deal.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3">
-                      <div className="font-medium text-gray-900 max-w-[220px] truncate">
-                        {url ? (
-                          <a href={url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
-                            {deal.hotel_name}
-                          </a>
-                        ) : (
-                          deal.hotel_name
-                        )}
-                      </div>
+                      {url ? (
+                        <a href={url} target="_blank" rel="noopener noreferrer" className="font-medium text-blue-600 hover:underline">
+                          {deal.hotel_name}
+                        </a>
+                      ) : (
+                        <span className="font-medium text-gray-900">{deal.hotel_name}</span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-gray-600 whitespace-nowrap">
                       {deal.city_name}, {deal.state}
                     </td>
-                    <td className="px-4 py-3 text-center text-amber-500 text-xs tracking-tight">
-                      {starsDisplay(deal.stars)}
-                    </td>
                     <td className="px-4 py-3 text-right">
-                      <span className={`font-bold ${deal.yield_ratio >= 50 ? "text-emerald-600" : deal.yield_ratio >= 40 ? "text-green-600" : "text-lime-600"}`}>
+                      <span className={`font-bold ${deal.yield_ratio >= 40 ? "text-emerald-600" : deal.yield_ratio >= 30 ? "text-green-600" : "text-lime-600"}`}>
                         {Number(deal.yield_ratio).toFixed(1)}x
                       </span>
                     </td>
@@ -162,8 +165,7 @@ export default async function Page(props: {
                       {Number(deal.total_miles).toLocaleString()}
                     </td>
                     <td className="px-4 py-3 text-gray-600 whitespace-nowrap">
-                      {deal.check_in}
-                      <span className="text-gray-400 text-xs ml-1">({deal.nights}n)</span>
+                      {fmtDate(deal.check_in)}
                     </td>
                     <td className="px-4 py-3 text-center">
                       <div className="flex items-center justify-center gap-2">
@@ -185,8 +187,8 @@ export default async function Page(props: {
               })
             ) : (
               <tr>
-                <td colSpan={8} className="px-4 py-12 text-center text-gray-400">
-                  {error ? "Error loading deals" : "No 30x+ deals found. Run the scraper to populate data."}
+                <td colSpan={7} className="px-4 py-12 text-center text-gray-400">
+                  No deals found at {minYield}x+{brand !== "all" ? ` for ${BRANDS[brand]}` : ""}. Try lowering the yield filter.
                 </td>
               </tr>
             )}
@@ -195,7 +197,7 @@ export default async function Page(props: {
       </div>
 
       <div className="mt-4 text-xs text-gray-400 text-center">
-        {dealCount} deals shown
+        {dealCount} deals
       </div>
     </main>
   );

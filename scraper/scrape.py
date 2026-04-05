@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 AA Hotels scraper — finds high-yield miles/dollar deals across US cities.
-Writes to Supabase aa_hotels.deals. Designed for GitHub Actions daily cron.
-Stores 15x+ deals; dashboard filters to 30x+ for display.
+Writes to Supabase aa_hotels.deals. Resumable across runs via scrape_progress.
 """
 
 import asyncio
@@ -20,10 +19,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 BASE = "https://www.aadvantagehotels.com"
-MIN_YIELD = 15.0  # Store 15x+, dashboard filters to 30x+
-MAX_CONCURRENT = 30  # Aggressive — proxy rotates IPs per request
+MIN_YIELD = 15.0
+MAX_CONCURRENT = 50  # Each request gets a fresh proxy IP
 DAYS_AHEAD = 90
-CITY_DELAY = 0.5  # Minimal — each request is a different IP
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
     "Accept": "application/json",
@@ -39,10 +37,10 @@ BRAND_PATTERNS: dict[str, list[str]] = {
         "LXR", "Motto", "Spark by", "Tempo by", "Tapestry", "Signia", "Canopy",
     ],
     "marriott": [
-        "Marriott", "Sheraton", "Westin", "W Hotel", "St. Regis",
-        "Ritz-Carlton", "JW Marriott", "Courtyard", "Residence Inn",
-        "SpringHill", "Fairfield", "TownePlace", "Four Points", "Aloft",
-        "Element", "Moxy", "AC Hotel", "Autograph", "Tribute",
+        "Marriott", "Sheraton", "Westin", "St. Regis", "Ritz-Carlton",
+        "JW Marriott", "Courtyard", "Residence Inn", "SpringHill", "Fairfield",
+        "TownePlace", "Four Points", "Aloft", "Element", "Moxy", "AC Hotel",
+        "Autograph", "Tribute", "W Dallas", "W Miami", "W Hotel",
     ],
     "ihg": [
         "InterContinental", "Holiday Inn", "Crowne Plaza", "Kimpton",
@@ -50,8 +48,19 @@ BRAND_PATTERNS: dict[str, list[str]] = {
         "Even Hotel", "Vignette", "Regent",
     ],
     "hyatt": [
-        "Hyatt", "Andaz", "Thompson", "Alila", "Caption",
+        "Hyatt", "Andaz", "Thompson Hotels", "Alila", "Caption",
         "Park Hyatt", "Grand Hyatt",
+    ],
+    "wyndham": [
+        "Wyndham", "La Quinta", "Ramada", "Days Inn", "Super 8",
+        "Microtel", "Baymont", "Wingate", "AmericInn", "Hawthorn",
+    ],
+    "bestwestern": [
+        "Best Western", "SureStay", "Aiden", "BW Signature",
+    ],
+    "choice": [
+        "Cambria", "Comfort Inn", "Comfort Suites", "Quality Inn",
+        "Clarion", "Sleep Inn", "Ascend", "WoodSpring",
     ],
 }
 
@@ -68,7 +77,6 @@ def detect_brand(name: str) -> str | None:
 # ── City data (Agoda place IDs) ─────────────────────────────────────────────
 
 CITIES: list[tuple[str, str, str]] = [
-    # (city, state, agoda_id)
     ("New York", "NY", "318"), ("Los Angeles", "CA", "12772"),
     ("Chicago", "IL", "7889"), ("Dallas", "TX", "8683"),
     ("Houston", "TX", "1178"), ("Washington", "DC", "2320"),
@@ -119,112 +127,98 @@ CITIES: list[tuple[str, str, str]] = [
 
 # ── API helpers ──────────────────────────────────────────────────────────────
 
-async def search_city(
+async def search_city_date(
     client: httpx.AsyncClient,
-    city: str,
-    state: str,
-    agoda_id: str,
-    check_in: datetime,
-    check_out: datetime,
+    sem: asyncio.Semaphore,
+    city: str, state: str, agoda_id: str,
+    check_in: datetime, check_out: datetime,
 ) -> list[dict[str, Any]]:
-    """Search hotels for one city/date combo, return parsed deals."""
-    place_id = f"AGODA_CITY|{agoda_id}"
-    ci = f"{check_in.month:02}/{check_in.day:02}/{check_in.year}"
-    co = f"{check_out.month:02}/{check_out.day:02}/{check_out.year}"
-    query_str = f"{city} ({state}), United States"
+    """Search hotels for one city/date combo. Returns parsed deals above MIN_YIELD."""
+    async with sem:
+        await asyncio.sleep(random.uniform(0.02, 0.1))
 
-    # Step 1: create search request
-    url = (
-        f"{BASE}/rest/aadvantage-hotels/searchRequest?"
-        f"adults=2&checkIn={quote(ci, safe='')}&checkOut={quote(co, safe='')}"
-        f"&children=0&currency=USD&language=en&locationType=CITY&mode=earn"
-        f"&numberOfChildren=0&placeId={quote(place_id, safe='')}"
-        f"&program=aadvantage&promotion&query={quote(query_str, safe='')}"
-        f"&rooms=1&source=AGODA"
-    )
+        place_id = f"AGODA_CITY|{agoda_id}"
+        ci = f"{check_in.month:02}/{check_in.day:02}/{check_in.year}"
+        co = f"{check_out.month:02}/{check_out.day:02}/{check_out.year}"
+        query_str = f"{city} ({state}), United States"
 
-    try:
-        r = await client.get(url)
-        if r.status_code != 200:
+        try:
+            r = await client.get(
+                f"{BASE}/rest/aadvantage-hotels/searchRequest?"
+                f"adults=2&checkIn={quote(ci, safe='')}&checkOut={quote(co, safe='')}"
+                f"&children=0&currency=USD&language=en&locationType=CITY&mode=earn"
+                f"&numberOfChildren=0&placeId={quote(place_id, safe='')}"
+                f"&program=aadvantage&promotion&query={quote(query_str, safe='')}"
+                f"&rooms=1&source=AGODA"
+            )
+            if r.status_code != 200:
+                return []
+            uuid = r.json().get("uuid")
+            if not uuid:
+                return []
+        except Exception:
             return []
-        uuid = r.json().get("uuid")
-        if not uuid:
+
+        await asyncio.sleep(random.uniform(0.05, 0.15))
+
+        try:
+            r = await client.get(f"{BASE}/rest/aadvantage-hotels/search/{uuid}?pageSize=45&pageNumber=1")
+            if r.status_code != 200:
+                return []
+            results_list = r.json().get("results", [])
+        except Exception:
             return []
-    except Exception:
-        return []
 
-    await asyncio.sleep(random.uniform(0.1, 0.3))
-
-    # Step 2: get results
-    try:
-        r = await client.get(f"{BASE}/rest/aadvantage-hotels/search/{uuid}?pageSize=45&pageNumber=1")
-        if r.status_code != 200:
+        if not results_list:
             return []
-        data = r.json()
-    except Exception:
-        return []
 
-    # Step 3: parse results
-    results_list = data.get("results", [])
-    if not results_list:
-        log.debug(f"No results for {city}, {state} on {check_in.date()}")
-        return []
+        nights = (check_out - check_in).days
+        deals = []
+        for h in results_list:
+            hotel = h.get("hotel", {})
+            name = hotel.get("name", "")
+            if not name:
+                continue
 
-    nights = (check_out - check_in).days
-    deals = []
-    raw_yields = []
-    for h in results_list:
-        hotel = h.get("hotel", {})
-        name = hotel.get("name", "")
-        if not name:
-            continue
+            price_obj = h.get("grandTotalPublishedPriceInclusiveWithFees", {})
+            total_cost = float(price_obj.get("amount", 0))
+            if total_cost <= 0:
+                total_cost = float(h.get("totalPriceUSD", {}).get("amount", 0))
+            if total_cost <= 0:
+                continue
 
-        price_obj = h.get("grandTotalPublishedPriceInclusiveWithFees", {})
-        total_cost = float(price_obj.get("amount", 0))
-        if total_cost <= 0:
-            total_cost = float(h.get("totalPriceUSD", {}).get("amount", 0))
-        if total_cost <= 0:
-            continue
+            total_miles = max(int(h.get("rewards", 0)), int(h.get("roomTypeResultTeaser", {}).get("rewards", 0)))
+            if total_miles <= 0:
+                continue
 
-        total_miles = max(int(h.get("rewards", 0)), int(h.get("roomTypeResultTeaser", {}).get("rewards", 0)))
-        if total_miles <= 0:
-            continue
+            yield_ratio = total_miles / total_cost
+            if yield_ratio < MIN_YIELD:
+                continue
 
-        yield_ratio = total_miles / total_cost
-        raw_yields.append(yield_ratio)
-        if yield_ratio < MIN_YIELD:
-            continue
+            hotel_id = str(hotel.get("id", ""))
+            deals.append({
+                "hotel_name": name,
+                "brand": detect_brand(name),
+                "city_name": city,
+                "state": state,
+                "stars": int(hotel.get("stars", 0)),
+                "check_in": check_in.strftime("%Y-%m-%d"),
+                "check_out": check_out.strftime("%Y-%m-%d"),
+                "nights": nights,
+                "total_cost": round(total_cost, 2),
+                "total_miles": total_miles,
+                "yield_ratio": round(yield_ratio, 2),
+                "url": f"{BASE}/hotel/{hotel_id}?checkIn={quote(ci, safe='')}&checkOut={quote(co, safe='')}&rooms=1&adults=2&mode=earn" if hotel_id else None,
+                "agoda_hotel_id": hotel_id,
+                "scraped_at": datetime.now(UTC).isoformat(),
+            })
 
-        hotel_id = str(hotel.get("id", ""))
-        booking_url = (
-            f"{BASE}/hotel/{hotel_id}?checkIn={quote(ci, safe='')}"
-            f"&checkOut={quote(co, safe='')}&rooms=1&adults=2&mode=earn"
-        ) if hotel_id else None
-
-        deals.append({
-            "hotel_name": name,
-            "brand": detect_brand(name),
-            "city_name": city,
-            "state": state,
-            "stars": int(hotel.get("stars", 0)),
-            "check_in": check_in.strftime("%Y-%m-%d"),
-            "check_out": check_out.strftime("%Y-%m-%d"),
-            "nights": nights,
-            "total_cost": round(total_cost, 2),
-            "total_miles": total_miles,
-            "yield_ratio": round(yield_ratio, 2),
-            "url": booking_url,
-            "agoda_hotel_id": hotel_id,
-            "scraped_at": datetime.now(UTC).isoformat(),
-        })
-
-    return deals
+        return deals
 
 
-# ── Main scraper ─────────────────────────────────────────────────────────────
+# ── Supabase helpers ─────────────────────────────────────────────────────────
 
 def get_supabase():
-    """Get Supabase client."""
     return create_client(
         os.environ["SUPABASE_URL"],
         os.environ["SUPABASE_SERVICE_ROLE_KEY"],
@@ -233,115 +227,93 @@ def get_supabase():
 
 
 def upsert_batch(sb, deals: list[dict[str, Any]]) -> int:
-    """Upsert a batch of deals, preserving is_booked."""
     if not deals:
         return 0
     stored = 0
     for i in range(0, len(deals), 100):
         batch = deals[i : i + 100]
-        result = sb.table("deals").upsert(
-            batch,
-            on_conflict="hotel_name,check_in,check_out",
-        ).execute()
+        result = sb.table("deals").upsert(batch, on_conflict="hotel_name,check_in,check_out").execute()
         stored += len(result.data) if result.data else 0
     return stored
 
 
 def get_completed_cities(sb, today_str: str) -> set[tuple[str, str]]:
-    """Get cities already scraped today from progress table."""
     result = sb.table("scrape_progress").select("city,state").eq("scraped_date", today_str).execute()
     return {(r["city"], r["state"]) for r in (result.data or [])}
 
 
 def mark_city_done(sb, city: str, state: str, today_str: str, deals_found: int):
-    """Mark a city as scraped today."""
     sb.table("scrape_progress").upsert(
         {"city": city, "state": state, "scraped_date": today_str, "deals_found": deals_found},
         on_conflict="city,state,scraped_date",
     ).execute()
 
 
+# ── Main ─────────────────────────────────────────────────────────────────────
+
 async def scrape_all() -> int:
-    """Scrape all cities, resuming from where last run stopped. Returns total deals stored."""
+    """Scrape remaining cities for today. Parallelizes ALL (city,date) pairs."""
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     today_str = today.strftime("%Y-%m-%d")
     dates = [(today + timedelta(days=d), today + timedelta(days=d + 1)) for d in range(1, DAYS_AHEAD + 1)]
 
     sb = get_supabase()
-
-    # Clean past deals + old progress
     sb.table("deals").delete().lt("check_in", today_str).execute()
     sb.table("scrape_progress").delete().lt("scraped_date", today_str).execute()
 
-    # Check which cities are already done today
     done = get_completed_cities(sb, today_str)
     remaining = [(c, s, a) for c, s, a in CITIES if (c, s) not in done]
 
     if not remaining:
-        log.info(f"All {len(CITIES)} cities already scraped today — nothing to do")
+        log.info(f"All {len(CITIES)} cities done today")
         return 0
 
-    log.info(f"{len(done)} cities already done today, {len(remaining)} remaining")
+    log.info(f"{len(done)} done, {len(remaining)} remaining ({len(remaining) * len(dates)} searches)")
+
+    # Proxy setup
+    proxy_user = os.environ.get("PROXY_USERNAME", "")
+    proxy_pass = os.environ.get("PROXY_PASSWORD", "")
+    proxy_url = f"http://{proxy_user}-rotate:{proxy_pass}@p.webshare.io:80" if proxy_user else None
+    log.info(f"Proxy: {'rotating residential' if proxy_url else 'NONE (will hit Cloudflare)'}")
 
     sem = asyncio.Semaphore(MAX_CONCURRENT)
     total_stored = 0
 
-    # Webshare rotating residential proxy
-    proxy_user = os.environ.get("PROXY_USERNAME", "")
-    proxy_pass = os.environ.get("PROXY_PASSWORD", "")
-    proxy_url = f"http://{proxy_user}-rotate:{proxy_pass}@p.webshare.io:80" if proxy_user else None
-    if proxy_url:
-        log.info("Using Webshare rotating proxy")
-    else:
-        log.warning("No proxy configured — may hit Cloudflare rate limits")
-
     async with httpx.AsyncClient(timeout=30.0, headers=HEADERS, follow_redirects=True, proxy=proxy_url) as client:
 
+        # Process city by city so we can mark progress + upsert incrementally
         for idx, (city, state, aid) in enumerate(remaining):
-            if idx > 0:
-                await asyncio.sleep(CITY_DELAY + random.uniform(0, 1))
-
-            async def search_date(ci: datetime, co: datetime):
-                async with sem:
-                    await asyncio.sleep(random.uniform(0.05, 0.15))
-                    return await search_city(client, city, state, aid, ci, co)
-
-            tasks = [search_date(ci, co) for ci, co in dates]
+            # Fire all dates for this city in parallel
+            tasks = [
+                search_city_date(client, sem, city, state, aid, ci, co)
+                for ci, co in dates
+            ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            city_deals: list[dict[str, Any]] = []
+            # Collect + dedupe (upsert handles conflict but we reduce payload)
+            best: dict[str, dict] = {}
             for r in results:
                 if isinstance(r, list):
-                    city_deals.extend(r)
+                    for d in r:
+                        key = f"{d['hotel_name']}|{d['check_in']}"
+                        if key not in best or d["yield_ratio"] > best[key]["yield_ratio"]:
+                            best[key] = d
 
-            # Deduplicate per city: best yield per (hotel_name, check_in)
-            best: dict[str, dict] = {}
-            for d in city_deals:
-                key = f"{d['hotel_name']}|{d['check_in']}"
-                if key not in best or d["yield_ratio"] > best[key]["yield_ratio"]:
-                    best[key] = d
             unique = list(best.values())
-
-            # Upsert deals + mark city as done
             stored = upsert_batch(sb, unique) if unique else 0
             total_stored += stored
             mark_city_done(sb, city, state, today_str, stored)
 
-            if stored:
-                top = max(d["yield_ratio"] for d in unique)
-                log.info(f"[{idx+1}/{len(remaining)}] {city}, {state}: {stored} deals (top {top:.1f}x)")
-            else:
-                log.info(f"[{idx+1}/{len(remaining)}] {city}, {state}: 0 deals")
+            top_str = f" (top {max(d['yield_ratio'] for d in unique):.1f}x)" if unique else ""
+            log.info(f"[{idx+1}/{len(remaining)}] {city}, {state}: {stored} deals{top_str}")
 
-    total_done = len(done) + len(remaining)
-    log.info(f"Run complete: {total_stored} deals stored this run, {total_done}/{len(CITIES)} cities done today")
+    log.info(f"Run complete: {total_stored} deals, {len(done)+len(remaining)}/{len(CITIES)} cities done")
     return total_stored
 
 
 async def main():
-    log.info(f"AA Hotels scraper — {len(CITIES)} cities, {DAYS_AHEAD} days, {MIN_YIELD}x+ threshold")
-    total = await scrape_all()
-    log.info(f"Done — {total} deals added this run")
+    log.info(f"AA Hotels scraper — {len(CITIES)} cities, {DAYS_AHEAD}d, {MIN_YIELD}x+, concurrency={MAX_CONCURRENT}")
+    await scrape_all()
 
 
 if __name__ == "__main__":
