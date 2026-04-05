@@ -25,6 +25,14 @@ function formatDate(iso: string) {
   return dt.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
+function dealUrl(deal: { url: string | null; city_name: string; check_in: string; check_out: string }) {
+  // New URLs use /search?... which works. Old URLs use /hotel/{id} which 404s.
+  if (deal.url && deal.url.includes("/search?")) return deal.url;
+  // Fallback: construct search URL from city + dates
+  const fmtD = (iso: string) => { const [y, m, d] = iso.split("-"); return `${m}/${d}/${y}`; };
+  return `https://www.aadvantagehotels.com/search?adults=2&checkIn=${encodeURIComponent(fmtD(deal.check_in))}&checkOut=${encodeURIComponent(fmtD(deal.check_out))}&currency=USD&language=en&mode=earn&program=aadvantage&query=${encodeURIComponent(deal.city_name)}&rooms=1&source=AGODA`;
+}
+
 export const dynamic = "force-dynamic";
 
 export default async function Page(props: {
@@ -42,7 +50,7 @@ export default async function Page(props: {
 
   let query = supabase
     .from("deals")
-    .select("id, hotel_name, city_name, state, yield_ratio, total_cost, total_miles, check_in, url")
+    .select("id, hotel_name, city_name, state, yield_ratio, total_cost, total_miles, check_in, check_out, url")
     .eq("is_booked", false)
     .gte("yield_ratio", minYield)
     .gte("check_in", todayStr)
@@ -135,7 +143,7 @@ export default async function Page(props: {
           <tbody className="divide-y">
             {deals && deals.length > 0 ? (
               deals.map((deal) => {
-                const url = deal.url;
+                const url = dealUrl(deal);
                 return (
                   <tr key={deal.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3">

@@ -259,7 +259,7 @@ async def search_city_date(
                 "total_cost": round(total_cost, 2),
                 "total_miles": total_miles,
                 "yield_ratio": round(yield_ratio, 2),
-                "url": f"{BASE}/hotel/{hotel_id}?checkIn={quote(ci, safe='')}&checkOut={quote(co, safe='')}&rooms=1&adults=2&mode=earn" if hotel_id else None,
+                "url": f"{BASE}/search?adults=2&checkIn={quote(ci, safe='')}&checkOut={quote(co, safe='')}&currency=USD&language=en&locationType=CITY&mode=earn&placeId={quote(place_id, safe='')}&program=aadvantage&query={quote(query_str, safe='')}&rooms=1&source=AGODA",
                 "agoda_hotel_id": hotel_id,
                 "scraped_at": datetime.now(UTC).isoformat(),
             })
