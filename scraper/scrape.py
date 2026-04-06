@@ -309,8 +309,6 @@ MIN_TOP_YIELD = 25.0  # Drop a city from top tier if its best yield falls below 
 
 def get_top_cities(sb, n: int = TOP_CITIES_N) -> list[tuple[str, str]]:
     """Get the top N cities by max yield from current deals data."""
-    result = sb.rpc("", {}).execute()  # Can't use rpc, use raw query via table
-    # Query top cities from deals table
     result = sb.table("deals").select("city_name, state, yield_ratio").gte(
         "yield_ratio", MIN_TOP_YIELD
     ).order("yield_ratio", desc=True).limit(1000).execute()
