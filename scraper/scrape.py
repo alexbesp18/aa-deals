@@ -277,6 +277,91 @@ def get_supabase():
     )
 
 
+def ensure_schema_accessible() -> bool:
+    """Verify aa_hotels schema is exposed in PostgREST. Re-register if not.
+
+    Returns True if schema is accessible (or was successfully re-registered).
+    Returns False if re-registration failed — scraper should abort.
+    """
+    sb = get_supabase()
+    try:
+        result = sb.table("deals").select("id", count="exact").limit(1).execute()
+        # If we get here without exception, PostgREST can see the schema
+        log.info(f"Schema health check OK — deals table accessible ({result.count} rows)")
+        return True
+    except Exception as e:
+        err_msg = str(e).lower()
+        if "schema" not in err_msg and "relation" not in err_msg and "not found" not in err_msg:
+            # Some other error (network, auth, etc.) — not a schema exposure issue
+            log.warning(f"Schema health check got unexpected error: {e}")
+            return True  # Don't block scraper for transient errors
+
+    log.warning("Schema aa_hotels is NOT accessible via PostgREST — attempting re-registration")
+
+    # Call public.register_exposed_schema() via direct HTTP to the PostgREST /rpc/ endpoint.
+    # We use the public schema (default) since aa_hotels isn't visible to PostgREST right now.
+    supabase_url = os.environ["SUPABASE_URL"]
+    service_key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+
+    try:
+        import httpx as _httpx  # already a dependency
+
+        # POST to /rest/v1/rpc/register_exposed_schema on the public schema
+        resp = _httpx.post(
+            f"{supabase_url}/rest/v1/rpc/register_exposed_schema",
+            headers={
+                "apikey": service_key,
+                "Authorization": f"Bearer {service_key}",
+                "Content-Type": "application/json",
+                # No Accept-Profile header → defaults to public schema
+            },
+            json={"schema_name": "aa_hotels"},
+            timeout=15.0,
+        )
+
+        if resp.status_code >= 400:
+            # The parameter might be named differently — try positional arg name variants
+            log.warning(f"RPC call returned {resp.status_code}: {resp.text}")
+
+            # Fallback: try with just the positional parameter name 'p_schema'
+            for param_name in ["p_schema", "name", "_schema_name"]:
+                resp = _httpx.post(
+                    f"{supabase_url}/rest/v1/rpc/register_exposed_schema",
+                    headers={
+                        "apikey": service_key,
+                        "Authorization": f"Bearer {service_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={param_name: "aa_hotels"},
+                    timeout=15.0,
+                )
+                if resp.status_code < 400:
+                    break
+
+        if resp.status_code < 400:
+            log.info("register_exposed_schema('aa_hotels') succeeded — waiting for PostgREST reload")
+            # Give PostgREST a moment to reload after NOTIFY
+            import time
+            time.sleep(3)
+
+            # Verify it worked
+            sb2 = get_supabase()
+            try:
+                sb2.table("deals").select("id", count="exact").limit(1).execute()
+                log.info("Schema re-registration VERIFIED — aa_hotels is accessible again")
+                return True
+            except Exception as verify_err:
+                log.error(f"Schema still not accessible after re-registration: {verify_err}")
+                return False
+        else:
+            log.error(f"register_exposed_schema RPC failed: {resp.status_code} {resp.text}")
+            return False
+
+    except Exception as exc:
+        log.error(f"Schema re-registration failed with exception: {exc}")
+        return False
+
+
 def upsert_batch(sb, deals: list[dict[str, Any]]) -> int:
     if not deals:
         return 0
@@ -418,6 +503,11 @@ async def main():
     import sys
     mode = sys.argv[1] if len(sys.argv) > 1 else "daily"
     assert mode in ("daily", "weekly"), f"Usage: scrape.py [daily|weekly], got '{mode}'"
+
+    # Health check: verify schema is accessible, re-register if needed
+    if not ensure_schema_accessible():
+        log.error("FATAL: aa_hotels schema is not accessible and re-registration failed. Aborting.")
+        sys.exit(1)
 
     sb = get_supabase()
     cities = get_cities_for_mode(sb, mode)

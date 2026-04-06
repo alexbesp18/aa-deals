@@ -123,7 +123,21 @@ export default async function Page(props: {
 
       {error && (
         <div className="bg-red-50 text-red-700 rounded-lg p-4 mb-6 text-sm">
-          Failed to load deals: {error.message}
+          {error.message?.toLowerCase().includes("schema") || error.message?.toLowerCase().includes("relation") ? (
+            <>
+              <p className="font-medium">Database schema needs re-registration</p>
+              <p className="mt-1 text-red-600">
+                The aa_hotels schema has fallen out of the PostgREST exposed schemas list.
+                The next scraper run will detect this and fix it automatically.
+                If this persists, manually run:{" "}
+                <code className="bg-red-100 px-1.5 py-0.5 rounded text-xs font-mono">
+                  SELECT public.register_exposed_schema(&apos;aa_hotels&apos;)
+                </code>
+              </p>
+            </>
+          ) : (
+            <>Failed to load deals: {error.message}</>
+          )}
         </div>
       )}
 
