@@ -300,31 +300,79 @@ def mark_city_done(sb, city: str, state: str, today_str: str, deals_found: int):
     ).execute()
 
 
+# ── Tiered scraping ──────────────────────────────────────────────────────────
+
+# Top 20 cities by yield — scraped daily. Auto-updated from weekly data.
+TOP_CITIES_N = 20
+MIN_TOP_YIELD = 25.0  # Drop a city from top tier if its best yield falls below this
+
+
+def get_top_cities(sb, n: int = TOP_CITIES_N) -> list[tuple[str, str]]:
+    """Get the top N cities by max yield from current deals data."""
+    result = sb.rpc("", {}).execute()  # Can't use rpc, use raw query via table
+    # Query top cities from deals table
+    result = sb.table("deals").select("city_name, state, yield_ratio").gte(
+        "yield_ratio", MIN_TOP_YIELD
+    ).order("yield_ratio", desc=True).limit(1000).execute()
+
+    # Aggregate by city: find max yield per city
+    city_best: dict[tuple[str, str], float] = {}
+    for row in (result.data or []):
+        key = (row["city_name"], row["state"])
+        yr = float(row["yield_ratio"])
+        if key not in city_best or yr > city_best[key]:
+            city_best[key] = yr
+
+    # Sort by best yield, take top N
+    ranked = sorted(city_best.items(), key=lambda x: x[1], reverse=True)[:n]
+    return [city for city, _ in ranked]
+
+
+def get_cities_for_mode(sb, mode: str) -> list[tuple[str, str, str]]:
+    """Return city list based on scraping mode."""
+    if mode == "weekly":
+        return CITIES  # Full universe
+
+    # Daily mode: only top cities
+    top = get_top_cities(sb)
+    top_set = set(top)
+    daily_cities = [(c, s, a) for c, s, a in CITIES if (c, s) in top_set]
+    log.info(f"Daily mode: {len(daily_cities)} top cities (of {len(CITIES)} total)")
+    for c, s in top[:5]:
+        log.info(f"  Top: {c}, {s}")
+    return daily_cities
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-async def scrape_all() -> int:
-    """Scrape remaining cities for today. Parallelizes ALL (city,date) pairs."""
+async def scrape_cities(cities: list[tuple[str, str, str]], mode: str) -> int:
+    """Scrape a list of cities. Resumable via scrape_progress."""
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     today_str = today.strftime("%Y-%m-%d")
     dates = [(today + timedelta(days=d), today + timedelta(days=d + 1)) for d in range(1, DAYS_AHEAD + 1)]
 
     sb = get_supabase()
-    sb.table("scrape_progress").delete().lt("scraped_date", today_str).execute()
+
+    # For weekly: clean old progress so all cities re-scrape
+    if mode == "weekly":
+        sb.table("scrape_progress").delete().eq("scraped_date", today_str).execute()
+        log.info("Weekly mode: cleared today's progress to force full re-scrape")
+    else:
+        sb.table("scrape_progress").delete().lt("scraped_date", today_str).execute()
 
     done = get_completed_cities(sb, today_str)
-    remaining = [(c, s, a) for c, s, a in CITIES if (c, s) not in done]
+    remaining = [(c, s, a) for c, s, a in cities if (c, s) not in done]
 
     if not remaining:
-        log.info(f"All {len(CITIES)} cities done today")
+        log.info(f"All {len(cities)} cities done for this run")
         return 0
 
     log.info(f"{len(done)} done, {len(remaining)} remaining ({len(remaining) * len(dates)} searches)")
 
-    # Proxy setup
     proxy_user = os.environ.get("PROXY_USERNAME", "")
     proxy_pass = os.environ.get("PROXY_PASSWORD", "")
     proxy_url = f"http://{proxy_user}-rotate:{proxy_pass}@p.webshare.io:80" if proxy_user else None
-    log.info(f"Proxy: {'rotating residential' if proxy_url else 'NONE (will hit Cloudflare)'}")
+    log.info(f"Proxy: {'rotating residential' if proxy_url else 'NONE'}")
 
     sem = asyncio.Semaphore(MAX_CONCURRENT)
     total_stored = 0
@@ -334,16 +382,13 @@ async def scrape_all() -> int:
         limits=httpx.Limits(max_connections=100, max_keepalive_connections=60),
     ) as client:
 
-        # Process city by city so we can mark progress + upsert incrementally
         for idx, (city, state, aid) in enumerate(remaining):
-            # Fire all dates for this city in parallel
             tasks = [
                 search_city_date(client, sem, city, state, aid, ci, co)
                 for ci, co in dates
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Collect + dedupe, track errors
             best: dict[str, dict] = {}
             errors: dict[str, int] = {}
             for r in results:
@@ -365,15 +410,22 @@ async def scrape_all() -> int:
             err_str = f" ERRORS: {errors}" if errors else ""
             log.info(f"[{idx+1}/{len(remaining)}] {city}, {state}: {stored} deals{top_str}{err_str}")
 
-    # Clean past deals AFTER successful processing (not before — avoids empty DB on crash)
-    deleted = sb.table("deals").delete().lt("check_in", today_str).execute()
-    log.info(f"Run complete: {total_stored} deals, {len(done)+len(remaining)}/{len(CITIES)} cities done, cleaned past deals")
+    # Clean past deals
+    sb.table("deals").delete().lt("check_in", today_str).execute()
+    log.info(f"Run complete: {total_stored} deals, {len(done)+len(remaining)}/{len(cities)} cities done")
     return total_stored
 
 
 async def main():
-    log.info(f"AA Hotels scraper — {len(CITIES)} cities, {DAYS_AHEAD}d, {MIN_YIELD}x+, concurrency={MAX_CONCURRENT}")
-    await scrape_all()
+    import sys
+    mode = sys.argv[1] if len(sys.argv) > 1 else "daily"
+    assert mode in ("daily", "weekly"), f"Usage: scrape.py [daily|weekly], got '{mode}'"
+
+    sb = get_supabase()
+    cities = get_cities_for_mode(sb, mode)
+
+    log.info(f"AA Hotels scraper — {mode} mode, {len(cities)} cities, {DAYS_AHEAD}d, {MIN_YIELD}x+")
+    await scrape_cities(cities, mode)
 
 
 if __name__ == "__main__":

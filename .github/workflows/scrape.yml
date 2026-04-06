@@ -2,8 +2,14 @@ name: Scrape Hotels
 
 on:
   schedule:
-    - cron: "0 */2 * * *" # Every 2 hours — resumes where last run stopped
-  workflow_dispatch: {}
+    - cron: "0 10 * * *"   # Daily at 10 AM UTC — top 20 cities only
+    - cron: "0 8 * * 0"    # Weekly Sunday 8 AM UTC — full 151 cities
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "daily (top 20) or weekly (all cities)"
+        required: false
+        default: "daily"
 
 jobs:
   scrape:
@@ -19,10 +25,21 @@ jobs:
       - name: Install dependencies
         run: pip install -r scraper/requirements.txt
 
-      - name: Run scraper
+      - name: Determine mode
+        id: mode
+        run: |
+          if [ "${{ github.event.schedule }}" = "0 8 * * 0" ]; then
+            echo "mode=weekly" >> $GITHUB_OUTPUT
+          elif [ -n "${{ github.event.inputs.mode }}" ]; then
+            echo "mode=${{ github.event.inputs.mode }}" >> $GITHUB_OUTPUT
+          else
+            echo "mode=daily" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run scraper (${{ steps.mode.outputs.mode }})
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           PROXY_USERNAME: ${{ secrets.PROXY_USERNAME }}
           PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
-        run: python scraper/scrape.py
+        run: python scraper/scrape.py ${{ steps.mode.outputs.mode }}
