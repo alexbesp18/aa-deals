@@ -278,87 +278,50 @@ def get_supabase():
 
 
 def ensure_schema_accessible() -> bool:
-    """Verify aa_hotels schema is exposed in PostgREST. Re-register if not.
+    """Verify aa_hotels schema is exposed in PostgREST. Trigger tripwire if not.
 
-    Returns True if schema is accessible (or was successfully re-registered).
-    Returns False if re-registration failed — scraper should abort.
+    The tripwire function register_exposed_schema() handles GRANTs and
+    auto-RESETs any rogue role-level pgrst.db_schemas override.
     """
     sb = get_supabase()
     try:
         result = sb.table("deals").select("id", count="exact").limit(1).execute()
-        # If we get here without exception, PostgREST can see the schema
-        log.info(f"Schema health check OK — deals table accessible ({result.count} rows)")
+        log.info(f"Schema health check OK ({result.count} deals)")
         return True
     except Exception as e:
         err_msg = str(e).lower()
         if "schema" not in err_msg and "relation" not in err_msg and "not found" not in err_msg:
-            # Some other error (network, auth, etc.) — not a schema exposure issue
-            log.warning(f"Schema health check got unexpected error: {e}")
-            return True  # Don't block scraper for transient errors
+            log.warning(f"Health check got non-schema error (continuing): {e}")
+            return True
 
-    log.warning("Schema aa_hotels is NOT accessible via PostgREST — attempting re-registration")
-
-    # Call public.register_exposed_schema() via direct HTTP to the PostgREST /rpc/ endpoint.
-    # We use the public schema (default) since aa_hotels isn't visible to PostgREST right now.
-    supabase_url = os.environ["SUPABASE_URL"]
-    service_key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    log.warning("aa_hotels schema not accessible — calling tripwire function")
 
     try:
-        import httpx as _httpx  # already a dependency
-
-        # POST to /rest/v1/rpc/register_exposed_schema on the public schema
-        resp = _httpx.post(
-            f"{supabase_url}/rest/v1/rpc/register_exposed_schema",
+        resp = httpx.post(
+            f"{os.environ['SUPABASE_URL']}/rest/v1/rpc/register_exposed_schema",
             headers={
-                "apikey": service_key,
-                "Authorization": f"Bearer {service_key}",
+                "apikey": os.environ["SUPABASE_SERVICE_ROLE_KEY"],
+                "Authorization": f"Bearer {os.environ['SUPABASE_SERVICE_ROLE_KEY']}",
                 "Content-Type": "application/json",
-                # No Accept-Profile header → defaults to public schema
             },
-            json={"schema_name": "aa_hotels"},
+            json={"p_schema_name": "aa_hotels"},
             timeout=15.0,
         )
-
-        if resp.status_code >= 400:
-            # The parameter might be named differently — try positional arg name variants
-            log.warning(f"RPC call returned {resp.status_code}: {resp.text}")
-
-            # Fallback: try with just the positional parameter name 'p_schema'
-            for param_name in ["p_schema", "name", "_schema_name"]:
-                resp = _httpx.post(
-                    f"{supabase_url}/rest/v1/rpc/register_exposed_schema",
-                    headers={
-                        "apikey": service_key,
-                        "Authorization": f"Bearer {service_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={param_name: "aa_hotels"},
-                    timeout=15.0,
-                )
-                if resp.status_code < 400:
-                    break
-
         if resp.status_code < 400:
-            log.info("register_exposed_schema('aa_hotels') succeeded — waiting for PostgREST reload")
-            # Give PostgREST a moment to reload after NOTIFY
-            import time
-            time.sleep(3)
-
-            # Verify it worked
-            sb2 = get_supabase()
+            log.info("Tripwire called — waiting for PostgREST reload")
+            import time; time.sleep(3)
             try:
-                sb2.table("deals").select("id", count="exact").limit(1).execute()
-                log.info("Schema re-registration VERIFIED — aa_hotels is accessible again")
+                get_supabase().table("deals").select("id").limit(1).execute()
+                log.info("Schema accessible after tripwire")
                 return True
-            except Exception as verify_err:
-                log.error(f"Schema still not accessible after re-registration: {verify_err}")
+            except Exception:
+                log.error("Schema STILL not accessible after tripwire — check Dashboard")
                 return False
         else:
-            log.error(f"register_exposed_schema RPC failed: {resp.status_code} {resp.text}")
+            log.error(f"Tripwire RPC failed: {resp.status_code} {resp.text}")
             return False
-
     except Exception as exc:
-        log.error(f"Schema re-registration failed with exception: {exc}")
+        log.error(f"Tripwire call failed: {exc}")
         return False
 
 
