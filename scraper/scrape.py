@@ -338,12 +338,19 @@ def ensure_schema_accessible() -> bool:
 
 
 def upsert_batch(sb, deals: list[dict[str, Any]]) -> int:
+    """Upsert deal batches. Raises on schema/auth failure (fail-loud in CI)."""
     if not deals:
         return 0
     stored = 0
     for i in range(0, len(deals), 100):
         batch = deals[i : i + 100]
-        result = sb.table("deals").upsert(batch, on_conflict="hotel_name,check_in,check_out").execute()
+        try:
+            result = sb.table("deals").upsert(batch, on_conflict="hotel_name,check_in,check_out").execute()
+        except Exception as e:
+            log.error(f"upsert_batch failed on chunk {i}: {type(e).__name__}: {e}")
+            raise  # surface schema mismatches + auth errors in GH Actions
+        if not result.data:
+            log.error(f"upsert_batch returned empty for chunk size {len(batch)} — possible schema mismatch")
         stored += len(result.data) if result.data else 0
     return stored
 
