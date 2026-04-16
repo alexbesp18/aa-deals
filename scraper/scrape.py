@@ -86,13 +86,25 @@ CITIES: list[tuple[str, str, str]] = [
     # ── US metros (deal-producing only, 44 zero-deal cities removed) ─────────
     ("New York", "NY", "318"), ("Los Angeles", "CA", "12772"),
     ("Dallas", "TX", "8683"), ("Houston", "TX", "1178"),
-    ("Washington", "DC", "2320"), ("Philadelphia", "PA", "2082"),
+    ("Philadelphia", "PA", "2082"),
     ("Boston", "MA", "9254"), ("San Francisco", "CA", "13801"),
-    ("Minneapolis", "MN", "8934"), ("Las Vegas", "NV", "17072"),
-    ("Austin", "TX", "4542"), ("Cincinnati", "OH", "4614"),
-    ("Indianapolis", "IN", "5270"), ("Cleveland", "OH", "1141"),
-    ("Tulsa", "OK", "5266"), ("Savannah", "GA", "5097"),
-    ("Fort Lauderdale", "FL", "2396"), ("Riverside", "CA", "21764"),
+    ("Las Vegas", "NV", "17072"),
+    ("Austin", "TX", "4542"),
+    # REMOVED 2026-04-16 — 11 US cities had broken Agoda place IDs (validated via
+    # API probe — placeId resolves to wrong location, returns foreign hotels).
+    # Need correct IDs before re-adding:
+    #   Washington DC (2320)    → Glion, Switzerland
+    #   Minneapolis MN (8934)   → Puerto Varas, Chile
+    #   Cincinnati OH (4614)    → Bolton, UK
+    #   Indianapolis IN (5270)  → Cadiz, Spain
+    #   Cleveland OH (1141)     → Mason OH (wrong OH city)
+    #   Tulsa OK (5266)         → Tampico, Mexico
+    #   Savannah GA (5097)      → Heiligenblut, Austria
+    #   Fort Lauderdale FL (2396) → Rotterdam, Netherlands
+    #   Maui HI (9296)          → Cherokee, NC
+    #   Memphis TN (3003)       → Riobamba, Ecuador
+    #   Columbus OH (7621)      → Jena, Germany
+    ("Riverside", "CA", "21764"),
     ("Detroit", "MI", "3322"), ("Virginia Beach", "VA", "8163"),
     ("Providence", "RI", "11639"), ("Grand Rapids", "MI", "17080"),
     ("Omaha", "NE", "13630"), ("Knoxville", "TN", "11658"),
@@ -108,8 +120,7 @@ CITIES: list[tuple[str, str, str]] = [
     ("Akron", "OH", "17138"), ("Des Moines", "IA", "20802"),
     ("Provo", "UT", "1537"), ("Daytona Beach", "FL", "3965"),
     ("Melbourne", "FL", "11456"), ("Syracuse", "NY", "5831"),
-    ("Maui", "HI", "9296"), ("Palm Beach", "FL", "16947"),
-    ("Memphis", "TN", "3003"),
+    ("Palm Beach", "FL", "16947"),
     # ── Additional MSAs ──────────────────────────────────────────────────────
     ("Rochester", "NY", "17127"), ("Fresno", "CA", "13602"),
     ("Worcester", "MA", "19522"), ("Scranton", "PA", "14274"),
@@ -158,7 +169,8 @@ CITIES: list[tuple[str, str, str]] = [
     ("Antigua Guatemala", "GT", "18181"),
     # Africa
     ("Zanzibar", "TZ", "9846"), ("Marrakech", "MA", "11825"),
-    ("Fes", "MA", "12050"),
+    # REMOVED 2026-04-16 — Fes (12050) resolves to Ras Al Khaimah, UAE.
+    # Correct Morocco Fes ID TBD.
     # Southeast Asia
     ("Ho Chi Minh City", "VN", "13170"), ("Hanoi", "VN", "2758"),
     ("Colombo", "LK", "7835"), ("Cebu", "PH", "4001"),
