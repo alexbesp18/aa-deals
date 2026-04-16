@@ -1,17 +1,6 @@
 import { getSupabase } from "@/lib/supabase";
 import { markAsBooked } from "./actions";
 
-const BRANDS: Record<string, string> = {
-  all: "All Brands",
-  hilton: "Hilton Family",
-  marriott: "Marriott Family",
-  ihg: "IHG Family",
-  hyatt: "Hyatt Family",
-  wyndham: "Wyndham Family",
-  bestwestern: "Best Western",
-  choice: "Choice Hotels",
-};
-
 const STATES = [
   "AL","AK","AZ","AR","CA","CO","CT","DC","DE","FL","GA","HI","ID","IL","IN",
   "IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH",
@@ -19,58 +8,125 @@ const STATES = [
   "VT","VA","WA","WV","WI","WY",
 ];
 
+const BRAND_MODES: Record<string, string> = {
+  all: "All Brands",
+  hilton: "Hilton Family",
+  sub_brand: "Hilton Sub-Brands Only",
+};
+
+const SUB_BRANDS_HONORS_BONUS = new Set(["Hampton", "HiltonGardenInn", "Tru"]);
+const HONORS_BONUS_START = "2026-04-07";
+const HONORS_BONUS_END = "2026-12-31";
+
 function formatDate(iso: string) {
   const [y, m, d] = iso.split("-").map(Number);
   const dt = new Date(y!, m! - 1, d!);
   return dt.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
+function formatSubBrand(s: string | null): string {
+  if (!s) return "";
+  if (s === "HiltonGardenInn") return "HGI";
+  if (s === "DoubleTree") return "DT";
+  return s;
+}
+
+function qualifiesForHonorsBonus(d: Deal): boolean {
+  return (
+    !!d.sub_brand &&
+    SUB_BRANDS_HONORS_BONUS.has(d.sub_brand) &&
+    STATES.includes(d.state) &&
+    d.check_in >= HONORS_BONUS_START &&
+    d.check_in <= HONORS_BONUS_END
+  );
+}
+
 function dealUrl(deal: { url: string | null; city_name: string; check_in: string; check_out: string }) {
-  // New URLs use /search?... which works. Old URLs use /hotel/{id} which 404s.
   if (deal.url && deal.url.includes("/search?")) return deal.url;
-  // Fallback: construct search URL from city + dates
   const fmtD = (iso: string) => { const [y, m, d] = iso.split("-"); return `${m}/${d}/${y}`; };
   return `https://www.aadvantagehotels.com/search?adults=2&checkIn=${encodeURIComponent(fmtD(deal.check_in))}&checkOut=${encodeURIComponent(fmtD(deal.check_out))}&currency=USD&language=en&mode=earn&program=aadvantage&query=${encodeURIComponent(deal.city_name)}&rooms=1&source=AGODA`;
 }
 
+type Deal = {
+  id: number;
+  hotel_name: string;
+  brand: string | null;
+  sub_brand: string | null;
+  city_name: string;
+  state: string;
+  yield_ratio: number;
+  total_cost: number;
+  total_miles: number;
+  check_in: string;
+  check_out: string;
+  url: string | null;
+};
+
+type Gem = Deal & { rank_in_sub_brand: number };
+
 export const dynamic = "force-dynamic";
 
 export default async function Page(props: {
-  searchParams: Promise<{ brand?: string; state?: string; min_yield?: string }>;
+  searchParams: Promise<{ brand_mode?: string; state?: string; min_yield?: string }>;
 }) {
   const searchParams = await props.searchParams;
-  const brand = searchParams.brand || "hilton";
+  const brandMode = ["all","hilton","sub_brand"].includes(searchParams.brand_mode || "")
+    ? (searchParams.brand_mode as string)
+    : "all";
   const stateFilter = searchParams.state || "all";
   const minYield = Number(searchParams.min_yield) || 30;
 
   const supabase = getSupabase();
-
   const today = new Date();
   const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 
   let query = supabase
     .from("deals")
-    .select("id, hotel_name, city_name, state, yield_ratio, total_cost, total_miles, check_in, check_out, url")
+    .select("id, hotel_name, brand, sub_brand, city_name, state, yield_ratio, total_cost, total_miles, check_in, check_out, url")
     .eq("is_booked", false)
     .gte("yield_ratio", minYield)
     .gte("check_in", todayStr)
     .order("yield_ratio", { ascending: false })
+    .order("total_cost", { ascending: true })
     .limit(200);
 
-  if (brand !== "all") {
-    query = query.eq("brand", brand);
-  }
-  if (stateFilter !== "all") {
-    query = query.eq("state", stateFilter);
-  }
+  if (brandMode === "hilton") query = query.eq("brand", "hilton");
+  if (brandMode === "sub_brand") query = query.not("sub_brand", "is", null);
+  if (stateFilter !== "all") query = query.eq("state", stateFilter);
 
-  // Parallel queries — no waterfall
-  const [{ data: deals, error }, { data: lastScrape }] = await Promise.all([
+  const gemsQuery = supabase
+    .from("deals")
+    .select("id, hotel_name, brand, sub_brand, city_name, state, yield_ratio, total_cost, total_miles, check_in, check_out, url")
+    .eq("is_booked", false)
+    .gte("yield_ratio", 30)
+    .not("sub_brand", "is", null)
+    .gte("check_in", todayStr)
+    .order("yield_ratio", { ascending: false })
+    .order("total_cost", { ascending: true })
+    .limit(50);
+
+  const [{ data: deals, error }, { data: scrapeProgress }, { data: gemsRaw }] = await Promise.all([
     query,
     supabase.from("scrape_progress").select("completed_at").order("completed_at", { ascending: false }).limit(1),
+    gemsQuery,
   ]);
+
+  const lastScraped = scrapeProgress?.[0]?.completed_at;
   const dealCount = deals?.length ?? 0;
-  const lastScraped = lastScrape?.[0]?.completed_at;
+
+  // Top 3 gems per sub-brand (computed client-side from the 50-row query)
+  const gemsBySubBrand = new Map<string, Gem[]>();
+  for (const d of (gemsRaw ?? []) as Deal[]) {
+    if (!d.sub_brand) continue;
+    const list = gemsBySubBrand.get(d.sub_brand) ?? [];
+    if (list.length < 3) {
+      list.push({ ...d, rank_in_sub_brand: list.length + 1 });
+      gemsBySubBrand.set(d.sub_brand, list);
+    }
+  }
+  const gemIds = new Set<number>();
+  for (const list of gemsBySubBrand.values()) for (const g of list) gemIds.add(g.id);
+  const showGems = (brandMode === "all" || brandMode === "sub_brand") && gemsBySubBrand.size > 0;
 
   return (
     <main className="max-w-7xl mx-auto px-4 py-6">
@@ -84,7 +140,7 @@ export default async function Page(props: {
           )}
         </div>
         <p className="text-sm text-gray-500">
-          Cherry-picked miles/dollar redemptions via aadvantagehotels.com
+          Cap-hit hotels at 30x+ miles/$ on aadvantagehotels.com. Sub-brand picks are walk-in-friendly for status grinding.
         </p>
       </div>
 
@@ -92,17 +148,16 @@ export default async function Page(props: {
         <div>
           <label className="block text-xs font-medium text-gray-500 mb-1">Min Yield</label>
           <select name="min_yield" defaultValue={String(minYield)} className="border rounded-md px-3 py-2 text-sm bg-white">
-            <option value="15">15x+</option>
-            <option value="20">20x+</option>
-            <option value="25">25x+</option>
-            <option value="30">30x+</option>
-            <option value="40">40x+</option>
+            <option value="25">25x+ (backup)</option>
+            <option value="30">30x+ (target)</option>
+            <option value="35">35x+ (premium)</option>
+            <option value="40">40x+ (exceptional)</option>
           </select>
         </div>
         <div>
-          <label className="block text-xs font-medium text-gray-500 mb-1">Brand</label>
-          <select name="brand" defaultValue={brand} className="border rounded-md px-3 py-2 text-sm bg-white">
-            {Object.entries(BRANDS).map(([key, label]) => (
+          <label className="block text-xs font-medium text-gray-500 mb-1">Brand Mode</label>
+          <select name="brand_mode" defaultValue={brandMode} className="border rounded-md px-3 py-2 text-sm bg-white">
+            {Object.entries(BRAND_MODES).map(([key, label]) => (
               <option key={key} value={key}>{label}</option>
             ))}
           </select>
@@ -111,9 +166,7 @@ export default async function Page(props: {
           <label className="block text-xs font-medium text-gray-500 mb-1">State</label>
           <select name="state" defaultValue={stateFilter} className="border rounded-md px-3 py-2 text-sm bg-white">
             <option value="all">All States</option>
-            {STATES.map((s) => (
-              <option key={s} value={s}>{s}</option>
-            ))}
+            {STATES.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
         </div>
         <button type="submit" className="bg-blue-600 text-white rounded-md px-5 py-2 text-sm font-medium hover:bg-blue-700 transition-colors">
@@ -127,17 +180,40 @@ export default async function Page(props: {
             <>
               <p className="font-medium">Database schema needs re-registration</p>
               <p className="mt-1 text-red-600">
-                The aa_hotels schema has fallen out of the PostgREST exposed schemas list.
-                The next scraper run will detect this and fix it automatically.
-                If this persists, manually run:{" "}
-                <code className="bg-red-100 px-1.5 py-0.5 rounded text-xs font-mono">
-                  SELECT public.register_exposed_schema(&apos;aa_hotels&apos;)
-                </code>
+                Next scraper run will auto-fix. If persistent, run:{" "}
+                <code className="bg-red-100 px-1.5 py-0.5 rounded text-xs font-mono">SELECT public.register_exposed_schema(&apos;aa_hotels&apos;)</code>
               </p>
             </>
           ) : (
             <>Failed to load deals: {error.message}</>
           )}
+        </div>
+      )}
+
+      {showGems && (
+        <div className="mb-6 bg-amber-50 border border-amber-200 rounded-lg p-4">
+          <h2 className="text-sm font-bold text-amber-800 mb-3">
+            ⭐ Top sub-brand gems (30x+, walk-in-friendly)
+          </h2>
+          <div className="space-y-1 text-sm">
+            {Array.from(gemsBySubBrand.entries()).map(([subBrand, list]) => (
+              <div key={subBrand} className="flex flex-wrap gap-x-3 items-baseline">
+                <span className="font-semibold text-amber-700 min-w-[90px]">{formatSubBrand(subBrand)}:</span>
+                {list.map((g) => (
+                  <a
+                    key={g.id}
+                    href={dealUrl(g)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-blue-600 hover:underline text-xs"
+                    title={g.hotel_name}
+                  >
+                    {g.city_name}, {g.state} · {Number(g.yield_ratio).toFixed(1)}x · ${Number(g.total_cost).toFixed(0)}
+                  </a>
+                )).reduce<React.ReactNode[]>((acc, el, i) => i === 0 ? [el] : [...acc, <span key={`sep-${i}`} className="text-amber-400">·</span>, el], [])}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -156,24 +232,42 @@ export default async function Page(props: {
           </thead>
           <tbody className="divide-y">
             {deals && deals.length > 0 ? (
-              deals.map((deal) => {
+              (deals as Deal[]).map((deal) => {
                 const url = dealUrl(deal);
+                const isGem = gemIds.has(deal.id);
+                const hasHonorsBonus = qualifiesForHonorsBonus(deal);
                 return (
-                  <tr key={deal.id} className="hover:bg-gray-50">
+                  <tr key={deal.id} className={`hover:bg-gray-50 ${isGem ? "bg-amber-50/40" : ""}`}>
                     <td className="px-4 py-3">
-                      {url ? (
-                        <a href={url} target="_blank" rel="noopener noreferrer" className="font-medium text-blue-600 hover:underline">
-                          {deal.hotel_name}
-                        </a>
-                      ) : (
-                        <span className="font-medium text-gray-900">{deal.hotel_name}</span>
-                      )}
+                      <div className="flex items-center gap-1.5">
+                        {isGem && <span title="Top sub-brand gem">⭐</span>}
+                        {url ? (
+                          <a href={url} target="_blank" rel="noopener noreferrer" className="font-medium text-blue-600 hover:underline">
+                            {deal.hotel_name}
+                          </a>
+                        ) : (
+                          <span className="font-medium text-gray-900">{deal.hotel_name}</span>
+                        )}
+                        {deal.sub_brand && (
+                          <span className="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">
+                            {formatSubBrand(deal.sub_brand)}
+                          </span>
+                        )}
+                        {hasHonorsBonus && (
+                          <span
+                            className="text-xs bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded"
+                            title="Hilton Honors bonus: +2,500 Honors on top of AA LP (Apr 7 – Dec 31, 2026, book by July 1)"
+                          >
+                            +2.5k HH
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-gray-600 whitespace-nowrap">
                       {deal.city_name}, {deal.state}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <span className={`font-bold ${deal.yield_ratio >= 40 ? "text-emerald-600" : deal.yield_ratio >= 30 ? "text-green-600" : "text-lime-600"}`}>
+                      <span className={`font-bold ${deal.yield_ratio >= 35 ? "text-emerald-600" : deal.yield_ratio >= 30 ? "text-green-600" : "text-lime-600"}`}>
                         {Number(deal.yield_ratio).toFixed(1)}x
                       </span>
                     </td>
@@ -207,7 +301,9 @@ export default async function Page(props: {
             ) : (
               <tr>
                 <td colSpan={7} className="px-4 py-12 text-center text-gray-400">
-                  No deals found at {minYield}x+{brand !== "all" ? ` for ${BRANDS[brand]}` : ""}. Try lowering the yield filter.
+                  No deals at {minYield}x+ {brandMode !== "all" ? `for ${BRAND_MODES[brandMode]}` : ""}
+                  {stateFilter !== "all" ? ` in ${stateFilter}` : ""}.
+                  {minYield >= 30 && " Try 25x+ as backup, or expand state filter."}
                 </td>
               </tr>
             )}
@@ -216,7 +312,7 @@ export default async function Page(props: {
       </div>
 
       <div className="mt-4 text-xs text-gray-400 text-center">
-        {dealCount} deals
+        {dealCount} deals · sorted by yield then cost
       </div>
     </main>
   );
