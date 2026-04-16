@@ -1,0 +1,38 @@
+name: Scrape SimplyMiles
+
+on:
+  schedule:
+    # 33 min past every 4h — offset from hotels (10 UTC) and portal (17 */6 UTC)
+    - cron: "33 */4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Run SimplyMiles scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SIMPLYMILES_SESSION_B64: ${{ secrets.SIMPLYMILES_SESSION_B64 }}
+        run: |
+          set +x
+          python scraper/simplymiles.py
+          EXIT=$?
+          if [ "$EXIT" -eq 2 ]; then
+            echo "::error::SimplyMiles session expired — run scripts/capture_session.py locally and push new SIMPLYMILES_SESSION_B64 secret"
+          fi
+          exit $EXIT
