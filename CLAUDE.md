@@ -1,3 +1,5 @@
+@~/projects/_groups/business/CLAUDE.md
+
 # AA Hotel Deals Dashboard
 
 One-pager showing 30x+ AA Advantage hotel redemptions globally. Cherry-picks the best miles-per-dollar deals from aadvantagehotels.com.
