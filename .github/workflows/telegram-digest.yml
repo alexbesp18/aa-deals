@@ -1,8 +1,9 @@
-name: Daily Digest
+name: Telegram Daily Digest
 
 on:
   schedule:
-    # 45 min past 13h UTC (08:45 CT) — after portal (12:17) + SM (12:33) have landed
+    # 13:45 UTC = 08:45 CT morning brief.
+    # Slot: after hotels (10:00), portal (12:17), SimplyMiles (12:33) land.
     - cron: "45 13 * * *"
   workflow_dispatch:
 
@@ -21,14 +22,12 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: |
-          pip install -r scraper/requirements.txt
-          pip install resend
+        run: pip install -r scraper/requirements.txt
 
-      - name: Send digest
+      - name: Send Telegram digest
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          DIGEST_TO: ${{ secrets.DIGEST_TO }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python scripts/digest.py

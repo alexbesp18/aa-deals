@@ -1,262 +1,323 @@
 #!/usr/bin/env python3
-"""Daily digest email — top stacks + new hotels + session health.
+"""Daily AA digest → Telegram.
 
-Silent-day rule: skips the email entirely if no stacks, no new deals,
-and SimplyMiles session isn't stale. Aligns with "advisors not monitors".
+Single morning message (08:45 CT) with:
+  - Top 10 US 30x+ bookable deals (deduped via aa_hotels.deals_best view)
+  - New-since-yesterday flag
+  - Pace: total LP from is_booked=true stays
+  - Scraper staleness warning if last scrape >36h
 
-Exit 0 on success (or silent-skip).
-Exit 1 on fatal error.
+Skip-day rule: no new deals AND no new bookings AND no warnings → no message.
+
+Exit codes: 0 success (or silent-skip), 1 fatal error.
+
+Usage:
+  python scripts/digest.py               # live send
+  python scripts/digest.py --dry-run     # print message, don't send
+  python scripts/digest.py --probe       # send a one-line "probe" to verify chat
 """
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timedelta, UTC
+from typing import Any
 
-import resend
+import httpx
 from supabase import create_client, ClientOptions
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-RESEND_FROM = "digest@novaconsultpro.com"
-DIGEST_TO_DEFAULT = "alexbespalovtx@gmail.com"
+TELEGRAM_API = "https://api.telegram.org"
+MAX_MESSAGE_CHARS = 1024   # single-bubble Telegram cap
+TOP_N = 10                 # rows in "top US 30x+" section
+STALE_SCRAPE_HOURS = 36
 
-STALE_SM_HOURS = 24 * 5   # 5 days — matches security review recommendation
-NEW_DEALS_WINDOW_HOURS = 24
 
+# ── Supabase ────────────────────────────────────────────────────────────────
 
-# ── Queries ──────────────────────────────────────────────────────────────────
-
-def client_for(schema: str):
+def sb():
     return create_client(
         os.environ["SUPABASE_URL"],
         os.environ["SUPABASE_SERVICE_ROLE_KEY"],
-        options=ClientOptions(schema=schema),
+        options=ClientOptions(schema="aa_hotels"),
     )
 
 
-def get_top_stacks(limit: int = 5) -> list[dict]:
-    sb = client_for("aa_tools")
-    try:
-        resp = (
-            sb.table("stack_view")
-            .select("merchant_name,portal_rate,sm_type,sm_miles_amount,sm_min_spend,sm_expires_at,combined_yield,portal_click_url")
-            .gte("combined_yield", 10)
-            .order("combined_yield", desc=True)
-            .limit(limit)
-            .execute()
-        )
-        return resp.data or []
-    except Exception as e:
-        log.warning(f"stack_view query failed: {type(e).__name__}")
-        return []
+def get_top_deals(limit: int = TOP_N) -> list[dict[str, Any]]:
+    """Top US 30x+ bookable deals, 1 row per property via deals_best view."""
+    resp = (
+        sb().table("deals_best")
+        .select("hotel_name,city_name,state,sub_brand,yield_ratio,total_cost,total_miles,check_in")
+        .eq("country_code", "US")
+        .gte("yield_ratio", 30)
+        .gte("check_in", datetime.now(UTC).date().isoformat())
+        .order("yield_ratio", desc=True)
+        .order("total_cost", desc=False)
+        .limit(limit)
+        .execute()
+    )
+    return resp.data or []
 
 
-def get_new_hotels(hours: int = NEW_DEALS_WINDOW_HOURS, limit: int = 5) -> list[dict]:
-    sb = client_for("aa_hotels")
-    cutoff = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
-    try:
-        resp = (
-            sb.table("deals")
-            .select("hotel_name,city_name,state,yield_ratio,total_cost,total_miles,check_in,check_out,url")
-            .gt("created_at", cutoff)
-            .eq("is_booked", False)
-            .order("yield_ratio", desc=True)
-            .limit(limit)
-            .execute()
-        )
-        return resp.data or []
-    except Exception as e:
-        log.warning(f"new hotels query failed: {type(e).__name__}")
-        return []
+def get_new_deals_24h() -> list[dict[str, Any]]:
+    """Deals with created_at in last 24h + yield ≥30 + US + bookable."""
+    cutoff = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
+    resp = (
+        sb().table("deals")
+        .select("hotel_name,city_name,state,sub_brand,yield_ratio,total_cost,total_miles,check_in,country_code")
+        .eq("country_code", "US")
+        .eq("is_booked", False)
+        .gte("yield_ratio", 30)
+        .gte("check_in", datetime.now(UTC).date().isoformat())
+        .gt("created_at", cutoff)
+        .order("yield_ratio", desc=True)
+        .limit(50)
+        .execute()
+    )
+    # Dedupe by (hotel_name, state) keeping best yield
+    seen: dict[tuple[str, str], dict[str, Any]] = {}
+    for d in resp.data or []:
+        key = (d["hotel_name"], d["state"])
+        if key not in seen or float(d["yield_ratio"]) > float(seen[key]["yield_ratio"]):
+            seen[key] = d
+    return sorted(seen.values(), key=lambda x: -float(x["yield_ratio"]))[:5]
 
 
-def get_session_health() -> dict:
-    """Return {'source': ..., 'last_success_at': ..., 'stale': bool} or {} if unknown."""
-    sb = client_for("aa_tools")
-    try:
-        resp = sb.table("session_state").select("*").eq("source", "simplymiles").limit(1).execute()
-    except Exception as e:
-        log.warning(f"session_state query failed: {type(e).__name__}")
-        return {}
+def get_pace() -> dict[str, Any]:
+    """Sum LP from booked stays."""
+    resp = (
+        sb().table("deals")
+        .select("total_miles")
+        .eq("is_booked", True)
+        .execute()
+    )
+    rows = resp.data or []
+    total_lp = sum(int(r.get("total_miles") or 0) for r in rows)
+    return {"total_lp": total_lp, "booked_count": len(rows)}
+
+
+def get_last_scrape_age_hours() -> float | None:
+    """Hours since most recent scrape_progress entry."""
+    resp = (
+        sb().table("scrape_progress")
+        .select("completed_at")
+        .order("completed_at", desc=True)
+        .limit(1)
+        .execute()
+    )
     rows = resp.data or []
     if not rows:
-        return {"source": "simplymiles", "last_success_at": None, "stale": True, "never_succeeded": True}
-    last = rows[0].get("last_success_at")
-    if not last:
-        return {"source": "simplymiles", "last_success_at": None, "stale": True, "never_succeeded": True}
-    age_hours = (datetime.now(UTC) - datetime.fromisoformat(last.replace("Z", "+00:00"))).total_seconds() / 3600
-    return {
-        "source": "simplymiles",
-        "last_success_at": last,
-        "age_hours": round(age_hours, 1),
-        "stale": age_hours >= STALE_SM_HOURS,
-        "never_succeeded": False,
-    }
+        return None
+    last = datetime.fromisoformat(rows[0]["completed_at"].replace("Z", "+00:00"))
+    return (datetime.now(UTC) - last).total_seconds() / 3600
 
 
-# ── HTML rendering ───────────────────────────────────────────────────────────
+# ── Formatting ──────────────────────────────────────────────────────────────
 
-def html_escape(s: str) -> str:
-    return (str(s or "")
-            .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            .replace('"', "&quot;").replace("'", "&#39;"))
-
-
-def render_stack_row(s: dict) -> str:
-    merchant = html_escape(s.get("merchant_name", ""))
-    url = s.get("portal_click_url")
-    merchant_html = f'<a href="{html_escape(url)}" style="color:#0066cc;text-decoration:none;">{merchant}</a>' if url else merchant
-    portal = Number_fmt(s.get("portal_rate"))
-    combined = Number_fmt(s.get("combined_yield"))
-    sm_type = s.get("sm_type")
-    sm_amount = s.get("sm_miles_amount", 0)
-    sm_min = s.get("sm_min_spend")
-    if sm_type == "flat_bonus" and sm_min:
-        sm_text = f"+{sm_amount} mi on ${Number_fmt(sm_min)}+"
-    elif sm_type == "per_dollar":
-        sm_text = f"+{sm_amount} mi/$"
-    else:
-        sm_text = f"+{sm_amount} mi"
-    return f"""
-      <tr style="border-bottom:1px solid #eee;">
-        <td style="padding:10px;font-weight:600;">{merchant_html}</td>
-        <td style="padding:10px;color:#666;font-size:13px;">{portal}x portal · {html_escape(sm_text)}</td>
-        <td style="padding:10px;text-align:right;color:#0f7938;font-weight:700;">{combined}x</td>
-      </tr>
-    """
+def fmt_sub_brand(s: str | None) -> str:
+    if not s:
+        return ""
+    return {"HiltonGardenInn": "HGI", "DoubleTree": "DT"}.get(s, s)
 
 
-def render_hotel_row(d: dict) -> str:
-    name = html_escape(d.get("hotel_name", ""))
-    city = html_escape(f"{d.get('city_name','')}, {d.get('state','')}")
-    yield_ = Number_fmt(d.get("yield_ratio"))
+def qualifies_honors_bonus(d: dict[str, Any]) -> bool:
+    """Apr 7 - Dec 31 2026, Hampton/HGI/Tru, US."""
+    sb_ = d.get("sub_brand")
+    if sb_ not in ("Hampton", "HiltonGardenInn", "Tru"):
+        return False
     ci = d.get("check_in", "")
-    url = d.get("url")
-    name_html = f'<a href="{html_escape(url)}" style="color:#0066cc;text-decoration:none;">{name}</a>' if url else name
-    return f"""
-      <tr style="border-bottom:1px solid #eee;">
-        <td style="padding:10px;">
-          <div style="font-weight:600;">{name_html}</div>
-          <div style="font-size:12px;color:#777;">{city} · {html_escape(ci)}</div>
-        </td>
-        <td style="padding:10px;text-align:right;color:#0f7938;font-weight:700;">{yield_}x</td>
-      </tr>
-    """
+    return "2026-04-07" <= ci <= "2026-12-31"
 
 
-def Number_fmt(v) -> str:
-    if v is None:
-        return "—"
-    try:
-        n = float(v)
-        return f"{n:.1f}".rstrip("0").rstrip(".") if n != int(n) else f"{int(n)}"
-    except (TypeError, ValueError):
-        return str(v)
+def fmt_deal_line(d: dict[str, Any]) -> str:
+    """One line per deal, ~60-90 chars."""
+    city = d["city_name"]
+    state = d["state"]
+    # Abbreviate Las Vegas → LV, Fort Worth → FW for brevity
+    city_short = {
+        "Las Vegas": "LV", "Fort Worth": "FW", "Winston-Salem": "W-S",
+        "Myrtle Beach": "Myrtle", "Detroit": "Detroit",
+    }.get(city, city)
+    hotel = d["hotel_name"]
+    # Truncate long names
+    if len(hotel) > 32:
+        # Drop common suffixes
+        hotel = hotel.replace(" – A Caesars Rewards Destination", "")
+        hotel = hotel.replace(", A Destination By Hyatt Hotel", " (Hyatt)")
+        hotel = hotel.replace(" by Hilton", "")
+        if len(hotel) > 32:
+            hotel = hotel[:30] + "…"
+    yield_v = float(d["yield_ratio"])
+    cost = int(float(d["total_cost"]))
+    sb_tag = fmt_sub_brand(d.get("sub_brand"))
+    sb_str = f" [{sb_tag}]" if sb_tag else ""
+    bonus = " +HH" if qualifies_honors_bonus(d) else ""
+    return f"• {hotel}{sb_str} · {city_short}, {state} · {yield_v:.1f}x · ${cost}{bonus}"
 
 
-def render_html(stacks: list[dict], hotels: list[dict], session: dict) -> str:
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
+def build_message(
+    top: list[dict[str, Any]],
+    new: list[dict[str, Any]],
+    pace: dict[str, Any],
+    scrape_age_h: float | None,
+    date_str: str,
+) -> str:
+    """Assemble the ≤1024-char Telegram message."""
+    lines = [f"🛎 <b>AA Deals · {date_str}</b>", ""]
 
-    stacks_section = ""
-    if stacks:
-        rows = "".join(render_stack_row(s) for s in stacks)
-        stacks_section = f"""
-          <h2 style="margin:24px 0 12px 0;font-size:16px;color:#333;">Top Stacks</h2>
-          <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#fff;border:1px solid #ddd;border-radius:4px;">
-            {rows}
-          </table>
-        """
+    if top:
+        lines.append(f"⭐ <b>US 30x+</b> ({len(top)} shown)")
+        for d in top:
+            lines.append(fmt_deal_line(d))
+        lines.append("")
 
-    hotels_section = ""
-    if hotels:
-        rows = "".join(render_hotel_row(h) for h in hotels)
-        hotels_section = f"""
-          <h2 style="margin:24px 0 12px 0;font-size:16px;color:#333;">New Hotel Deals (24h)</h2>
-          <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#fff;border:1px solid #ddd;border-radius:4px;">
-            {rows}
-          </table>
-        """
+    if new:
+        lines.append(f"🆕 <b>New since yesterday: {len(new)}</b>")
+        for d in new[:5]:
+            lines.append(fmt_deal_line(d))
+        lines.append("")
 
-    status_section = ""
-    if session.get("stale"):
-        reason = "never captured" if session.get("never_succeeded") else "stale"
-        status_section = f"""
-          <div style="margin-top:24px;background:#fff3cd;border-left:4px solid #ffc107;padding:12px;border-radius:4px;">
-            <p style="margin:0;font-weight:600;color:#856404;">SimplyMiles session {reason}</p>
-            <p style="margin:4px 0 0 0;font-size:13px;color:#856404;">
-              Run <code style="background:#fff;padding:2px 4px;border-radius:2px;">python scripts/capture_session.py</code> locally to refresh.
-            </p>
-          </div>
-        """
+    lp = pace["total_lp"]
+    bc = pace["booked_count"]
+    pct = round((lp / 200000) * 100, 1) if lp else 0
+    lines.append(f"📊 Earned: {lp:,} / 200K LP ({pct}%) · {bc} booked")
 
-    return f"""<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AA Digest · {today}</title>
-</head>
-<body style="margin:0;padding:16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f9f9f9;line-height:1.5;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:0 auto;">
-    <tr><td style="padding:0 0 12px 0;border-bottom:2px solid #e0e0e0;">
-      <h1 style="margin:0;font-size:20px;color:#0066cc;">AA Digest</h1>
-      <p style="margin:4px 0 0 0;font-size:12px;color:#999;">{today}</p>
-    </td></tr>
-    <tr><td>{stacks_section}{hotels_section}{status_section}</td></tr>
-    <tr><td style="padding:24px 0 0 0;border-top:1px solid #e0e0e0;text-align:center;">
-      <p style="margin:0;font-size:12px;color:#999;">
-        <a href="https://aa-deals.vercel.app" style="color:#0066cc;text-decoration:none;">Dashboard</a> ·
-        <a href="https://aa-deals.vercel.app/stacks" style="color:#0066cc;text-decoration:none;">Stacks</a>
-      </p>
-    </td></tr>
-  </table>
-</body></html>"""
+    if scrape_age_h and scrape_age_h > STALE_SCRAPE_HOURS:
+        lines.append(f"⚠️ Scraper last ran {scrape_age_h:.0f}h ago")
+
+    lines.append("🔗 https://aa-deals.vercel.app")
+
+    msg = "\n".join(lines)
+    # Trim if over cap — drop bottom of top list first
+    if len(msg) > MAX_MESSAGE_CHARS:
+        # Recalculate with fewer top rows
+        for cap in (8, 6, 4, 2):
+            trimmed_top = top[:cap]
+            lines2 = [f"🛎 <b>AA Deals · {date_str}</b>", ""]
+            if trimmed_top:
+                lines2.append(f"⭐ <b>US 30x+</b> (top {cap} shown)")
+                for d in trimmed_top:
+                    lines2.append(fmt_deal_line(d))
+                lines2.append("")
+            if new:
+                lines2.append(f"🆕 <b>New: {len(new)}</b>")
+                for d in new[:3]:
+                    lines2.append(fmt_deal_line(d))
+                lines2.append("")
+            lines2.append(f"📊 {lp:,} / 200K LP · {bc} booked")
+            if scrape_age_h and scrape_age_h > STALE_SCRAPE_HOURS:
+                lines2.append(f"⚠️ Scraper last ran {scrape_age_h:.0f}h ago")
+            lines2.append("🔗 aa-deals.vercel.app")
+            msg = "\n".join(lines2)
+            if len(msg) <= MAX_MESSAGE_CHARS:
+                break
+    return msg
 
 
-# ── Decision + send ──────────────────────────────────────────────────────────
+def should_send(
+    top: list, new: list, pace: dict, scrape_age_h: float | None
+) -> bool:
+    """Skip if nothing new AND no bookings recorded AND scraper healthy."""
+    if new:
+        return True
+    if pace.get("booked_count", 0) > 0:
+        return True
+    if scrape_age_h and scrape_age_h > STALE_SCRAPE_HOURS:
+        return True
+    if top:
+        # Still send — this is an info digest showing standing inventory.
+        # If we've never seen top picks, tomorrow's message would be same.
+        # Accept a daily ping for habit formation.
+        return True
+    return False
 
-def should_send(stacks: list, hotels: list, session: dict) -> bool:
-    return bool(stacks) or bool(hotels) or session.get("stale", False)
 
+# ── Telegram ────────────────────────────────────────────────────────────────
+
+def send_telegram(text: str, *, token: str, chat_id: str) -> bool:
+    """Send HTML message. Retry on transient errors + 429 rate limit."""
+    url = f"{TELEGRAM_API}/bot{token}/sendMessage"
+    for attempt in range(3):
+        try:
+            r = httpx.post(
+                url,
+                json={
+                    "chat_id": chat_id,
+                    "text": text,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                },
+                timeout=15,
+            )
+            if r.status_code == 200:
+                return True
+            if r.status_code == 429:
+                retry_after = int((r.json().get("parameters") or {}).get("retry_after", 5))
+                log.warning(f"Telegram 429 — waiting {retry_after}s")
+                time.sleep(retry_after)
+                continue
+            log.error(f"Telegram HTTP {r.status_code}: {r.text[:200]}")
+        except httpx.HTTPError as e:
+            log.warning(f"Telegram send attempt {attempt + 1} failed: {type(e).__name__}")
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+    return False
+
+
+# ── Main ────────────────────────────────────────────────────────────────────
 
 def main() -> int:
-    stacks = get_top_stacks()
-    hotels = get_new_hotels()
-    session = get_session_health()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dry-run", action="store_true", help="Print message, do not send")
+    parser.add_argument("--probe", action="store_true", help="Send a one-line probe to verify chat routing")
+    args = parser.parse_args()
 
-    log.info(f"stacks={len(stacks)} new_hotels={len(hotels)} session_stale={session.get('stale')}")
-
-    if not should_send(stacks, hotels, session):
-        log.info("Silent day — skipping email")
-        return 0
-
-    api_key = os.environ.get("RESEND_API_KEY")
-    if not api_key:
-        log.error("RESEND_API_KEY not set")
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        log.error("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set")
         return 1
 
-    to = os.environ.get("DIGEST_TO", DIGEST_TO_DEFAULT)
-    resend.api_key = api_key
-
-    html = render_html(stacks, hotels, session)
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
-    subject = f"AA Digest · {today} — {len(stacks)} stacks, {len(hotels)} new hotels"
-    if session.get("stale"):
-        subject += " · ⚠️ session stale"
+    if args.probe:
+        ok = send_telegram(
+            f"🤖 AA digest probe · {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}",
+            token=token, chat_id=chat_id,
+        )
+        return 0 if ok else 1
 
     try:
-        resp = resend.Emails.send({
-            "from": RESEND_FROM,
-            "to": [to],
-            "subject": subject,
-            "html": html,
-        })
-        log.info(f"Digest sent (id={resp.get('id') if isinstance(resp, dict) else 'ok'})")
-        return 0
+        top = get_top_deals()
+        new = get_new_deals_24h()
+        pace = get_pace()
+        scrape_age_h = get_last_scrape_age_hours()
     except Exception as e:
-        log.error(f"Resend send failed: {type(e).__name__}: {e}")
+        log.error(f"Query failed: {type(e).__name__}: {e}")
         return 1
+
+    log.info(f"top={len(top)} new={len(new)} booked={pace['booked_count']} scrape_age_h={scrape_age_h}")
+
+    if not should_send(top, new, pace, scrape_age_h):
+        log.info("Skip-day rule triggered — no message sent")
+        return 0
+
+    today = datetime.now(UTC).strftime("%a %b %-d")
+    msg = build_message(top, new, pace, scrape_age_h, today)
+
+    if args.dry_run:
+        print("─── DRY RUN — message that would be sent ───")
+        print(msg)
+        print("─── end ───")
+        print(f"Length: {len(msg)} / {MAX_MESSAGE_CHARS}")
+        return 0
+
+    ok = send_telegram(msg, token=token, chat_id=chat_id)
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
