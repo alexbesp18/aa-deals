@@ -20,6 +20,12 @@ const REGIONS: Record<string, string> = {
   all: "US + International",
 };
 
+const CHECKIN_TIERS: Record<string, string> = {
+  all: "All (phantom + physical)",
+  phantom: "💼 Phantom only (digital check-in)",
+  physical: "🏨 Physical only (staffed lobby)",
+};
+
 const SUB_BRANDS_HONORS_BONUS = new Set(["Hampton", "HiltonGardenInn", "Tru"]);
 const HONORS_BONUS_START = "2026-04-07";
 const HONORS_BONUS_END = "2026-12-31";
@@ -58,6 +64,7 @@ type Deal = {
   hotel_name: string;
   brand: string | null;
   sub_brand: string | null;
+  checkin_tier: string;
   city_name: string;
   state: string;
   yield_ratio: number;
@@ -71,7 +78,7 @@ type Deal = {
 export const dynamic = "force-dynamic";
 
 export default async function Page(props: {
-  searchParams: Promise<{ brand_mode?: string; state?: string; min_yield?: string; region?: string }>;
+  searchParams: Promise<{ brand_mode?: string; state?: string; min_yield?: string; region?: string; checkin?: string }>;
 }) {
   const searchParams = await props.searchParams;
   const brandMode = ["all","hilton","sub_brand"].includes(searchParams.brand_mode || "")
@@ -80,6 +87,9 @@ export default async function Page(props: {
   const region = ["us","intl","all"].includes(searchParams.region || "")
     ? (searchParams.region as string)
     : "us";
+  const checkinFilter = ["all","phantom","physical"].includes(searchParams.checkin || "")
+    ? (searchParams.checkin as string)
+    : "all";
   const stateFilter = searchParams.state || "all";
   const minYield = Number(searchParams.min_yield) || 30;
 
@@ -90,7 +100,7 @@ export default async function Page(props: {
   // deals_best view = 1 row per (hotel_name, state) with best yield
   let query = supabase
     .from("deals_best")
-    .select("id, hotel_name, brand, sub_brand, city_name, state, yield_ratio, total_cost, total_miles, check_in, check_out, url")
+    .select("id, hotel_name, brand, sub_brand, checkin_tier, city_name, state, yield_ratio, total_cost, total_miles, check_in, check_out, url")
     .gte("yield_ratio", minYield)
     .gte("check_in", todayStr)
     .order("yield_ratio", { ascending: false })
@@ -101,12 +111,13 @@ export default async function Page(props: {
   if (brandMode === "sub_brand") query = query.not("sub_brand", "is", null);
   if (region === "us") query = query.eq("country_code", "US");
   if (region === "intl") query = query.neq("country_code", "US");
+  if (checkinFilter !== "all") query = query.eq("checkin_tier", checkinFilter);
   if (stateFilter !== "all") query = query.eq("state", stateFilter);
 
   // Gems: top 1 per sub-brand at 30x+, US only
   const gemsQuery = supabase
     .from("deals_best")
-    .select("id, hotel_name, brand, sub_brand, city_name, state, yield_ratio, total_cost, total_miles, check_in, check_out, url")
+    .select("id, hotel_name, brand, sub_brand, checkin_tier, city_name, state, yield_ratio, total_cost, total_miles, check_in, check_out, url")
     .gte("yield_ratio", 30)
     .not("sub_brand", "is", null)
     .gte("check_in", todayStr)
@@ -176,6 +187,14 @@ export default async function Page(props: {
           <label className="block text-xs font-medium text-gray-500 mb-1">Brand Mode</label>
           <select name="brand_mode" defaultValue={brandMode} className="border rounded-md px-3 py-2 text-sm bg-white">
             {Object.entries(BRAND_MODES).map(([key, label]) => (
+              <option key={key} value={key}>{label}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-gray-500 mb-1">Check-in Type</label>
+          <select name="checkin" defaultValue={checkinFilter} className="border rounded-md px-3 py-2 text-sm bg-white">
+            {Object.entries(CHECKIN_TIERS).map(([key, label]) => (
               <option key={key} value={key}>{label}</option>
             ))}
           </select>
@@ -259,6 +278,13 @@ export default async function Page(props: {
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-1.5 flex-wrap">
                         {isGem && <span title="US sub-brand gem">⭐</span>}
+                        <span
+                          title={deal.checkin_tier === "phantom"
+                            ? "Phantom-friendly — digital check-in usually works remotely"
+                            : "Physical check-in — staffed lobby, ID verified"}
+                        >
+                          {deal.checkin_tier === "phantom" ? "💼" : "🏨"}
+                        </span>
                         {url ? (
                           <a href={url} target="_blank" rel="noopener noreferrer" className="font-medium text-blue-600 hover:underline">
                             {deal.hotel_name}

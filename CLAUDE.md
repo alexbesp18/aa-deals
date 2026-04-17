@@ -50,6 +50,7 @@ GitHub Actions crons → Python scrapers → Webshare proxy → AA Hotels API �
 - **Region default**: US only. International available via filter (50 unique 30x+ intl properties if user wants a Vietnam/Bangkok/Riyadh run).
 - **Dedup view**: `aa_hotels.deals_best` uses `DISTINCT ON (hotel_name, state)` — main table shows 1 row per property; prevents flood of 60 same-hotel date variants.
 - **Generated sub_brand column**: classifies Hampton/Homewood/HGI/DoubleTree/Embassy/Tru/Home2 at INSERT (excludes timeshare + Curio/LXR). Indexed for fast filtering.
+- **Generated checkin_tier column**: classifies hotels as 💼 `phantom` (digital check-in friendly: Hampton/HGI/Homewood/Home2/Tru/DoubleTree/Embassy/Fairfield) or 🏨 `physical` (staffed lobby: Conrad/Waldorf/LXR/Curio/Caesars casinos/Virgin/resorts/everything else default). Per community consensus. Dashboard + Telegram split on this.
 - **⭐ gem section**: dynamic top 2 per sub-brand at 30x+, US only. Surfaces Detroit HGI-class finds automatically.
 - **+2.5k HH badge**: Hampton/HGI/Tru stays in US, Apr 7 – Dec 31 2026 (Hilton Honors promo).
 - **Broken Agoda place ID defense**: removed 12 cities (Washington DC, Minneapolis, Cleveland, Indianapolis, Cincinnati, Columbus, Tulsa, Savannah, Fort Lauderdale, Maui, Memphis, Fes) whose IDs resolved to Spain/UK/Chile/Germany. See commit d07548a.

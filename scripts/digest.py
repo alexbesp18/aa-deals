@@ -49,13 +49,14 @@ def sb():
     )
 
 
-def get_top_deals(limit: int = TOP_N) -> list[dict[str, Any]]:
-    """Top US 30x+ bookable deals, 1 row per property via deals_best view."""
+def get_deals_by_tier(tier: str, min_yield: int, limit: int) -> list[dict[str, Any]]:
+    """US deals at min_yield, filtered by checkin_tier ('phantom' or 'physical')."""
     resp = (
         sb().table("deals_best")
-        .select("hotel_name,city_name,state,sub_brand,yield_ratio,total_cost,total_miles,check_in")
+        .select("hotel_name,city_name,state,sub_brand,checkin_tier,yield_ratio,total_cost,total_miles,check_in")
         .eq("country_code", "US")
-        .gte("yield_ratio", 30)
+        .eq("checkin_tier", tier)
+        .gte("yield_ratio", min_yield)
         .gte("check_in", datetime.now(UTC).date().isoformat())
         .order("yield_ratio", desc=True)
         .order("total_cost", desc=False)
@@ -162,80 +163,64 @@ def fmt_deal_line(d: dict[str, Any]) -> str:
 
 
 def build_message(
-    top: list[dict[str, Any]],
+    phantom: list[dict[str, Any]],
+    physical: list[dict[str, Any]],
     new: list[dict[str, Any]],
     pace: dict[str, Any],
     scrape_age_h: float | None,
     date_str: str,
 ) -> str:
-    """Assemble the ≤1024-char Telegram message."""
-    lines = [f"🛎 <b>AA Deals · {date_str}</b>", ""]
+    """Assemble the ≤1024-char Telegram message with phantom + physical sections."""
 
-    if top:
-        lines.append(f"⭐ <b>US 30x+</b> ({len(top)} shown)")
-        for d in top:
-            lines.append(fmt_deal_line(d))
-        lines.append("")
+    def assemble(phantom_cap: int, physical_cap: int, new_cap: int) -> str:
+        lines = [f"🛎 <b>AA Deals · {date_str}</b>", ""]
+        if phantom:
+            lines.append(f"💼 <b>Phantom-friendly 25x+</b> (top {min(phantom_cap, len(phantom))})")
+            for d in phantom[:phantom_cap]:
+                lines.append(fmt_deal_line(d))
+            lines.append("")
+        if physical:
+            lines.append(f"🏨 <b>Physical 30x+</b> (top {min(physical_cap, len(physical))})")
+            for d in physical[:physical_cap]:
+                lines.append(fmt_deal_line(d))
+            lines.append("")
+        if new:
+            lines.append(f"🆕 <b>New since yesterday: {len(new)}</b>")
+            for d in new[:new_cap]:
+                lines.append(fmt_deal_line(d))
+            lines.append("")
 
-    if new:
-        lines.append(f"🆕 <b>New since yesterday: {len(new)}</b>")
-        for d in new[:5]:
-            lines.append(fmt_deal_line(d))
-        lines.append("")
+        lp = pace["total_lp"]
+        bc = pace["booked_count"]
+        pct = round((lp / 200000) * 100, 1) if lp else 0
+        lines.append(f"📊 Earned: {lp:,} / 200K LP ({pct}%) · {bc} booked")
 
-    lp = pace["total_lp"]
-    bc = pace["booked_count"]
-    pct = round((lp / 200000) * 100, 1) if lp else 0
-    lines.append(f"📊 Earned: {lp:,} / 200K LP ({pct}%) · {bc} booked")
+        if scrape_age_h and scrape_age_h > STALE_SCRAPE_HOURS:
+            lines.append(f"⚠️ Scraper last ran {scrape_age_h:.0f}h ago")
 
-    if scrape_age_h and scrape_age_h > STALE_SCRAPE_HOURS:
-        lines.append(f"⚠️ Scraper last ran {scrape_age_h:.0f}h ago")
+        lines.append("🔗 https://aa-deals.vercel.app")
+        return "\n".join(lines)
 
-    lines.append("🔗 https://aa-deals.vercel.app")
-
-    msg = "\n".join(lines)
-    # Trim if over cap — drop bottom of top list first
-    if len(msg) > MAX_MESSAGE_CHARS:
-        # Recalculate with fewer top rows
-        for cap in (8, 6, 4, 2):
-            trimmed_top = top[:cap]
-            lines2 = [f"🛎 <b>AA Deals · {date_str}</b>", ""]
-            if trimmed_top:
-                lines2.append(f"⭐ <b>US 30x+</b> (top {cap} shown)")
-                for d in trimmed_top:
-                    lines2.append(fmt_deal_line(d))
-                lines2.append("")
-            if new:
-                lines2.append(f"🆕 <b>New: {len(new)}</b>")
-                for d in new[:3]:
-                    lines2.append(fmt_deal_line(d))
-                lines2.append("")
-            lines2.append(f"📊 {lp:,} / 200K LP · {bc} booked")
-            if scrape_age_h and scrape_age_h > STALE_SCRAPE_HOURS:
-                lines2.append(f"⚠️ Scraper last ran {scrape_age_h:.0f}h ago")
-            lines2.append("🔗 aa-deals.vercel.app")
-            msg = "\n".join(lines2)
-            if len(msg) <= MAX_MESSAGE_CHARS:
-                break
-    return msg
+    # Ladder: ideal → progressively trim if over cap
+    for pcap, hcap, ncap in [(5, 7, 3), (4, 6, 3), (3, 5, 2), (3, 4, 2), (2, 3, 1)]:
+        msg = assemble(pcap, hcap, ncap)
+        if len(msg) <= MAX_MESSAGE_CHARS:
+            return msg
+    return msg  # last attempt, may exceed — telegram will truncate
 
 
 def should_send(
-    top: list, new: list, pace: dict, scrape_age_h: float | None
+    phantom: list, physical: list, new: list, pace: dict, scrape_age_h: float | None
 ) -> bool:
-    """Skip if nothing new AND no bookings recorded AND scraper healthy."""
+    """Skip if nothing new AND no bookings recorded AND scraper healthy AND no inventory."""
     if new:
         return True
     if pace.get("booked_count", 0) > 0:
         return True
     if scrape_age_h and scrape_age_h > STALE_SCRAPE_HOURS:
         return True
-    if top:
-        # Still send — this is an info digest showing standing inventory.
-        # If we've never seen top picks, tomorrow's message would be same.
-        # Accept a daily ping for habit formation.
-        return True
-    return False
+    # Still send daily for habit formation if any standing inventory
+    return bool(phantom or physical)
 
 
 # ── Telegram ────────────────────────────────────────────────────────────────
@@ -292,7 +277,8 @@ def main() -> int:
         return 0 if ok else 1
 
     try:
-        top = get_top_deals()
+        phantom = get_deals_by_tier("phantom", min_yield=25, limit=10)
+        physical = get_deals_by_tier("physical", min_yield=30, limit=10)
         new = get_new_deals_24h()
         pace = get_pace()
         scrape_age_h = get_last_scrape_age_hours()
@@ -300,14 +286,14 @@ def main() -> int:
         log.error(f"Query failed: {type(e).__name__}: {e}")
         return 1
 
-    log.info(f"top={len(top)} new={len(new)} booked={pace['booked_count']} scrape_age_h={scrape_age_h}")
+    log.info(f"phantom={len(phantom)} physical={len(physical)} new={len(new)} booked={pace['booked_count']} scrape_age_h={scrape_age_h}")
 
-    if not should_send(top, new, pace, scrape_age_h):
+    if not should_send(phantom, physical, new, pace, scrape_age_h):
         log.info("Skip-day rule triggered — no message sent")
         return 0
 
     today = datetime.now(UTC).strftime("%a %b %-d")
-    msg = build_message(top, new, pace, scrape_age_h, today)
+    msg = build_message(phantom, physical, new, pace, scrape_age_h, today)
 
     if args.dry_run:
         print("─── DRY RUN — message that would be sent ───")
