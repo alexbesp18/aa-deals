@@ -1,17 +1,23 @@
 import { getSupabase } from "@/lib/supabase";
 import { markAsBooked } from "./actions";
 
-const STATES = [
+const US_STATES = [
   "AL","AK","AZ","AR","CA","CO","CT","DC","DE","FL","GA","HI","ID","IL","IN",
   "IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH",
   "NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT",
-  "VT","VA","WA","WV","WI","WY",
+  "VT","VA","WA","WV","WI","WY","PR",
 ];
 
 const BRAND_MODES: Record<string, string> = {
   all: "All Brands",
   hilton: "Hilton Family",
   sub_brand: "Hilton Sub-Brands Only",
+};
+
+const REGIONS: Record<string, string> = {
+  us: "United States only",
+  intl: "International only",
+  all: "US + International",
 };
 
 const SUB_BRANDS_HONORS_BONUS = new Set(["Hampton", "HiltonGardenInn", "Tru"]);
@@ -35,7 +41,7 @@ function qualifiesForHonorsBonus(d: Deal): boolean {
   return (
     !!d.sub_brand &&
     SUB_BRANDS_HONORS_BONUS.has(d.sub_brand) &&
-    STATES.includes(d.state) &&
+    US_STATES.includes(d.state) &&
     d.check_in >= HONORS_BONUS_START &&
     d.check_in <= HONORS_BONUS_END
   );
@@ -62,17 +68,18 @@ type Deal = {
   url: string | null;
 };
 
-type Gem = Deal & { rank_in_sub_brand: number };
-
 export const dynamic = "force-dynamic";
 
 export default async function Page(props: {
-  searchParams: Promise<{ brand_mode?: string; state?: string; min_yield?: string }>;
+  searchParams: Promise<{ brand_mode?: string; state?: string; min_yield?: string; region?: string }>;
 }) {
   const searchParams = await props.searchParams;
   const brandMode = ["all","hilton","sub_brand"].includes(searchParams.brand_mode || "")
     ? (searchParams.brand_mode as string)
     : "all";
+  const region = ["us","intl","all"].includes(searchParams.region || "")
+    ? (searchParams.region as string)
+    : "us";
   const stateFilter = searchParams.state || "all";
   const minYield = Number(searchParams.min_yield) || 30;
 
@@ -80,30 +87,33 @@ export default async function Page(props: {
   const today = new Date();
   const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 
+  // deals_best view = 1 row per (hotel_name, state) with best yield
   let query = supabase
-    .from("deals")
+    .from("deals_best")
     .select("id, hotel_name, brand, sub_brand, city_name, state, yield_ratio, total_cost, total_miles, check_in, check_out, url")
-    .eq("is_booked", false)
     .gte("yield_ratio", minYield)
     .gte("check_in", todayStr)
     .order("yield_ratio", { ascending: false })
     .order("total_cost", { ascending: true })
-    .limit(200);
+    .limit(300);
 
   if (brandMode === "hilton") query = query.eq("brand", "hilton");
   if (brandMode === "sub_brand") query = query.not("sub_brand", "is", null);
+  if (region === "us") query = query.in("state", US_STATES);
+  if (region === "intl") query = query.not("state", "in", `(${US_STATES.map(s => `"${s}"`).join(",")})`);
   if (stateFilter !== "all") query = query.eq("state", stateFilter);
 
+  // Gems: top 1 per sub-brand at 30x+, US only
   const gemsQuery = supabase
-    .from("deals")
+    .from("deals_best")
     .select("id, hotel_name, brand, sub_brand, city_name, state, yield_ratio, total_cost, total_miles, check_in, check_out, url")
-    .eq("is_booked", false)
     .gte("yield_ratio", 30)
     .not("sub_brand", "is", null)
     .gte("check_in", todayStr)
+    .in("state", US_STATES)
     .order("yield_ratio", { ascending: false })
     .order("total_cost", { ascending: true })
-    .limit(50);
+    .limit(20);
 
   const [{ data: deals, error }, { data: scrapeProgress }, { data: gemsRaw }] = await Promise.all([
     query,
@@ -114,13 +124,13 @@ export default async function Page(props: {
   const lastScraped = scrapeProgress?.[0]?.completed_at;
   const dealCount = deals?.length ?? 0;
 
-  // Top 3 gems per sub-brand (computed client-side from the 50-row query)
-  const gemsBySubBrand = new Map<string, Gem[]>();
+  // Top 1 per sub-brand — since view already gives 1 per property, just take first of each sub_brand
+  const gemsBySubBrand = new Map<string, Deal[]>();
   for (const d of (gemsRaw ?? []) as Deal[]) {
     if (!d.sub_brand) continue;
     const list = gemsBySubBrand.get(d.sub_brand) ?? [];
-    if (list.length < 3) {
-      list.push({ ...d, rank_in_sub_brand: list.length + 1 });
+    if (list.length < 2) {
+      list.push(d);
       gemsBySubBrand.set(d.sub_brand, list);
     }
   }
@@ -140,7 +150,7 @@ export default async function Page(props: {
           )}
         </div>
         <p className="text-sm text-gray-500">
-          Cap-hit hotels at 30x+ miles/$ on aadvantagehotels.com. Sub-brand picks are walk-in-friendly for status grinding.
+          Cap-hit hotels at 30x+ miles/$ on aadvantagehotels.com. One row per property · cheapest date at peak yield.
         </p>
       </div>
 
@@ -155,6 +165,14 @@ export default async function Page(props: {
           </select>
         </div>
         <div>
+          <label className="block text-xs font-medium text-gray-500 mb-1">Region</label>
+          <select name="region" defaultValue={region} className="border rounded-md px-3 py-2 text-sm bg-white">
+            {Object.entries(REGIONS).map(([key, label]) => (
+              <option key={key} value={key}>{label}</option>
+            ))}
+          </select>
+        </div>
+        <div>
           <label className="block text-xs font-medium text-gray-500 mb-1">Brand Mode</label>
           <select name="brand_mode" defaultValue={brandMode} className="border rounded-md px-3 py-2 text-sm bg-white">
             {Object.entries(BRAND_MODES).map(([key, label]) => (
@@ -166,7 +184,7 @@ export default async function Page(props: {
           <label className="block text-xs font-medium text-gray-500 mb-1">State</label>
           <select name="state" defaultValue={stateFilter} className="border rounded-md px-3 py-2 text-sm bg-white">
             <option value="all">All States</option>
-            {STATES.map((s) => <option key={s} value={s}>{s}</option>)}
+            {US_STATES.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
         </div>
         <button type="submit" className="bg-blue-600 text-white rounded-md px-5 py-2 text-sm font-medium hover:bg-blue-700 transition-colors">
@@ -193,7 +211,7 @@ export default async function Page(props: {
       {showGems && (
         <div className="mb-6 bg-amber-50 border border-amber-200 rounded-lg p-4">
           <h2 className="text-sm font-bold text-amber-800 mb-3">
-            ⭐ Top sub-brand gems (30x+, walk-in-friendly)
+            ⭐ US sub-brand gems (30x+, walk-in-friendly)
           </h2>
           <div className="space-y-1 text-sm">
             {Array.from(gemsBySubBrand.entries()).map(([subBrand, list]) => (
@@ -210,7 +228,7 @@ export default async function Page(props: {
                   >
                     {g.city_name}, {g.state} · {Number(g.yield_ratio).toFixed(1)}x · ${Number(g.total_cost).toFixed(0)}
                   </a>
-                )).reduce<React.ReactNode[]>((acc, el, i) => i === 0 ? [el] : [...acc, <span key={`sep-${i}`} className="text-amber-400">·</span>, el], [])}
+                ))}
               </div>
             ))}
           </div>
@@ -226,7 +244,7 @@ export default async function Page(props: {
               <th className="px-4 py-3 font-medium text-gray-600 text-right">Yield</th>
               <th className="px-4 py-3 font-medium text-gray-600 text-right">Cost</th>
               <th className="px-4 py-3 font-medium text-gray-600 text-right">Miles</th>
-              <th className="px-4 py-3 font-medium text-gray-600">Date</th>
+              <th className="px-4 py-3 font-medium text-gray-600">Best Date</th>
               <th className="px-4 py-3 font-medium text-gray-600 text-center w-32">Actions</th>
             </tr>
           </thead>
@@ -239,8 +257,8 @@ export default async function Page(props: {
                 return (
                   <tr key={deal.id} className={`hover:bg-gray-50 ${isGem ? "bg-amber-50/40" : ""}`}>
                     <td className="px-4 py-3">
-                      <div className="flex items-center gap-1.5">
-                        {isGem && <span title="Top sub-brand gem">⭐</span>}
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        {isGem && <span title="US sub-brand gem">⭐</span>}
                         {url ? (
                           <a href={url} target="_blank" rel="noopener noreferrer" className="font-medium text-blue-600 hover:underline">
                             {deal.hotel_name}
@@ -302,8 +320,9 @@ export default async function Page(props: {
               <tr>
                 <td colSpan={7} className="px-4 py-12 text-center text-gray-400">
                   No deals at {minYield}x+ {brandMode !== "all" ? `for ${BRAND_MODES[brandMode]}` : ""}
-                  {stateFilter !== "all" ? ` in ${stateFilter}` : ""}.
-                  {minYield >= 30 && " Try 25x+ as backup, or expand state filter."}
+                  {region !== "all" ? ` in ${REGIONS[region]}` : ""}
+                  {stateFilter !== "all" ? ` (state: ${stateFilter})` : ""}.
+                  {" "}Try dropping yield to 25x+ or switching region.
                 </td>
               </tr>
             )}
@@ -312,7 +331,7 @@ export default async function Page(props: {
       </div>
 
       <div className="mt-4 text-xs text-gray-400 text-center">
-        {dealCount} deals · sorted by yield then cost
+        {dealCount} unique properties · 1 row per hotel at best date · {REGIONS[region]}
       </div>
     </main>
   );
