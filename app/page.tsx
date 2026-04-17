@@ -99,8 +99,8 @@ export default async function Page(props: {
 
   if (brandMode === "hilton") query = query.eq("brand", "hilton");
   if (brandMode === "sub_brand") query = query.not("sub_brand", "is", null);
-  if (region === "us") query = query.in("state", US_STATES);
-  if (region === "intl") query = query.not("state", "in", `(${US_STATES.map(s => `"${s}"`).join(",")})`);
+  if (region === "us") query = query.eq("country_code", "US");
+  if (region === "intl") query = query.neq("country_code", "US");
   if (stateFilter !== "all") query = query.eq("state", stateFilter);
 
   // Gems: top 1 per sub-brand at 30x+, US only
@@ -110,7 +110,7 @@ export default async function Page(props: {
     .gte("yield_ratio", 30)
     .not("sub_brand", "is", null)
     .gte("check_in", todayStr)
-    .in("state", US_STATES)
+    .eq("country_code", "US")
     .order("yield_ratio", { ascending: false })
     .order("total_cost", { ascending: true })
     .limit(20);

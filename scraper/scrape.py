@@ -259,11 +259,15 @@ async def search_city_date(
                 continue
 
             hotel_id = str(hotel.get("id", ""))
+            # country_code: 'US' for US states + PR, ISO code otherwise.
+            # Resolves state/country collisions (AR=Arkansas vs Argentina etc.)
+            country_code = "US" if state in US_STATES or state == "PR" else state
             deals.append({
                 "hotel_name": name,
                 "brand": detect_brand(name),
                 "city_name": city,
                 "state": state,
+                "country_code": country_code,
                 "stars": int(hotel.get("stars", 0)),
                 "check_in": check_in.strftime("%Y-%m-%d"),
                 "check_out": check_out.strftime("%Y-%m-%d"),
