@@ -29,7 +29,7 @@ GitHub Actions crons → Python scrapers → Webshare proxy → AA Hotels API �
   • scrape.yml          daily top-20 @ 10 UTC, weekly full @ Sun 08 UTC
   • scrape-portal.yml   every 6h :17 (aa_tools.portal_rates, 1,004 merchants)
   • scrape-simplymiles.yml.disabled   (needs user to push SIMPLYMILES_SESSION_B64)
-  • health-digest.yml.disabled        (needs user to push RESEND_API_KEY or migrate to Telegram)
+  • telegram-digest.yml               daily 13:45 UTC (08:45 CT morning brief via Telegram bot)
 ```
 
 ### Stack
@@ -93,7 +93,7 @@ deals_best VIEW  -- SELECT DISTINCT ON (hotel_name, state) ordered by yield DESC
 | `SUPABASE_SERVICE_ROLE_KEY` | Vercel + GH Actions | Service role | ✅ Active |
 | `PROXY_USERNAME` / `PROXY_PASSWORD` | GH Actions | Webshare residential proxy | ✅ Active |
 | `SIMPLYMILES_SESSION_B64` | GH Actions | Cookie JSON for SM scraper | ⏳ Pending user capture via `scripts/capture_session.py` |
-| `RESEND_API_KEY` | GH Actions | Digest email | ⏳ Or migrate digest to Telegram (other projects use it) |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | GH Actions | Daily digest bot | ✅ Active (shared with cc-tracker/dylan-tracker/options-tracker) |
 
 ## Open follow-ups
 
